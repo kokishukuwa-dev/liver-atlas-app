@@ -1,6 +1,8 @@
 // 肝臓3Dアトラス v2：描画・カメラ・階層の切り替え・画面の部品
 (function () {
+  const tScriptsDone = performance.now();
   const A = window.LiverApp;
+  const BK = window.LiverBaked;
   const canvas = document.getElementById("gl");
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, preserveDrawingBuffer: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
@@ -9,6 +11,7 @@
   renderer.toneMappingExposure = 1.04;
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  const tGlDone = performance.now();
 
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 100);
@@ -16,7 +19,7 @@
   // ===== 環境光（粘土〜樹脂の艶を出しつつ白飛びさせないスタジオ） =====
   (function makeEnv() {
     const es = new THREE.Scene();
-    const g = new THREE.SphereGeometry(20, 36, 18);
+    const g = new THREE.SphereGeometry(20, 16, 8);
     const pos = g.attributes.position, cols = [];
     for (let i = 0; i < pos.count; i++) {
       const y = pos.getY(i) / 20;
@@ -26,9 +29,14 @@
       cols.push(c[0], c[1], c[2]);
     }
     g.setAttribute("color", new THREE.Float32BufferAttribute(cols, 3));
-    es.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide })));
+    const sm = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide });
+    es.add(new THREE.Mesh(g, sm));
+    const tmpGeo = [g], tmpMat = [sm];
     const box = (w, h, p, k) => {
-      const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ color: new THREE.Color(k, k * 0.97, k * 0.93), side: THREE.DoubleSide }));
+      const pg = new THREE.PlaneGeometry(w, h);
+      const pm2 = new THREE.MeshBasicMaterial({ color: new THREE.Color(k, k * 0.97, k * 0.93), side: THREE.DoubleSide });
+      tmpGeo.push(pg); tmpMat.push(pm2);
+      const m = new THREE.Mesh(pg, pm2);
       m.position.set(p[0], p[1], p[2]); m.lookAt(0, 0, 0); es.add(m);
     };
     box(8, 5, [7, 11, 8], 2.7);
@@ -38,7 +46,10 @@
     const pm = new THREE.PMREMGenerator(renderer);
     scene.environment = pm.fromScene(es, 0.035).texture;
     pm.dispose();
+    tmpGeo.forEach((x) => x.dispose());
+    tmpMat.forEach((x) => x.dispose());
   })();
+  const tEnvDone = performance.now();
   scene.add(new THREE.HemisphereLight(0xfff5e8, 0xb59c84, 0.36));
   const key = new THREE.DirectionalLight(0xfff4e4, 1.25);
   key.position.set(5, 9, 7);
@@ -167,6 +178,7 @@
   }
 
   // ===== 階層の移動（拡大・縮小しながら切り替える） =====
+  let pendingNav = 0;
   function goLevel(i) {
     i = Math.max(0, Math.min(4, i));
     if (trans || i === state.level) return;
@@ -191,7 +203,18 @@
       buildLabels(); renderPanel(); renderFlowHud(); syncNav();
       if (!document.getElementById("th" + i).classList.contains("ready")) thumb(i);
     };
-    if (needBuild) { showLoader(true, `L${i + 1} を組み立て中…`); setTimeout(() => { run(); showLoader(false); }, 20); } else run();
+    if (BK && !BK.isReadyFor(i, state.species, state.path)) {
+      const navSeq = ++pendingNav;
+      showLoader(true, `L${i + 1} を読み込み中…`);
+      BK.ensureFor(i, state.species, state.path).then(() => {
+        if (navSeq !== pendingNav || trans) { showLoader(false); return; }
+        run(); showLoader(false);
+      });
+    } else if (needBuild && !BK) {
+      showLoader(true, `L${i + 1} を組み立て中…`); setTimeout(() => { run(); showLoader(false); }, 20);
+    } else {
+      run();
+    }
   }
   function stepTransition(dt) {
     if (!trans) return;
@@ -282,7 +305,7 @@
       else { l.w = l.el.offsetWidth || 80; l.h = l.el.offsetHeight || 20; }
     }
   }
-  function buildLabels() {
+  function buildLabels(skipMeasure) {
     labelEls.forEach((l) => { l.el.remove(); l.line.remove(); l.dot.remove(); });
     labelEls = [];
     const L = levels[state.level]; if (!L) return;
@@ -293,9 +316,9 @@
       labelsEl.appendChild(el);
       const line = document.createElementNS("http://www.w3.org/2000/svg", "line"); linesEl.appendChild(line);
       const dot = document.createElementNS("http://www.w3.org/2000/svg", "circle"); dot.setAttribute("r", 3.2); linesEl.appendChild(dot);
-      labelEls.push({ el, line, dot, sid: lb.sid, lb, w: el.offsetWidth || 80, h: el.offsetHeight || 20 });
+      labelEls.push({ el, line, dot, sid: lb.sid, lb, w: 80, h: 20 });
     });
-    measureLabels();
+    if (!skipMeasure) measureLabels();
   }
   const tmpV = new THREE.Vector3();
   const safeBox = { x0: 270, x1: 1240, y0: 74, y1: 880 };
@@ -554,14 +577,21 @@
     document.getElementById("btnPlay").textContent = state.playing ? "動き：再生中" : "動き：停止中";
   }
   function rebuildCurrent() {
-    showLoader(true, "切り替え中…");
-    setTimeout(() => {
+    const curLv = state.level, curSp = state.species, curPt = state.path;
+    const apply = () => {
+      if (state.level !== curLv || state.species !== curSp || state.path !== curPt) return;
       const L = ensure(state.level);
       L.group.visible = true; applyXray(L); setOpacity(L, 1);
       state.sel = null; buildLabels(); renderPanel(); renderFlowHud(); syncNav();
       thumb(state.level);
       showLoader(false);
-    }, 20);
+    };
+    if (BK && !BK.isReadyFor(curLv, curSp, curPt)) {
+      showLoader(true, "切り替え中…");
+      BK.ensureFor(curLv, curSp, curPt).then(apply);
+    } else {
+      apply();
+    }
   }
   document.querySelectorAll("#species button").forEach((b) => b.addEventListener("click", () => { if (state.species === b.dataset.v || trans) return; state.species = b.dataset.v; rebuildCurrent(); }));
   document.querySelectorAll("#state button").forEach((b) => b.addEventListener("click", () => { if (state.path === b.dataset.v || trans) return; state.path = b.dataset.v; rebuildCurrent(); }));
@@ -641,19 +671,24 @@
   cam.lastInputReal = -10;
   ["pointerdown", "wheel"].forEach((ev) => canvas.addEventListener(ev, () => { cam.lastInputReal = performance.now() / 1000; }));
 
-  // ===== サムネイル撮影（オフスクリーンRenderTarget：sRGBのまま描画しシェーダ再コンパイルを0にする） =====
+  // ===== サムネイル撮影（遅延初期化：起動パスから外し、L1表示後に生成） =====
   const TH_SIZE = 160;
-  const thumbRT = new THREE.WebGLRenderTarget(TH_SIZE, TH_SIZE, { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, encoding: THREE.sRGBEncoding });
-  const thumbBuf = new Uint8Array(TH_SIZE * TH_SIZE * 4);
-  const thumbCanvas = document.createElement("canvas");
-  thumbCanvas.width = thumbCanvas.height = TH_SIZE;
-  const thumbCtx = thumbCanvas.getContext("2d");
-  const thumbImg = thumbCtx.createImageData(TH_SIZE, TH_SIZE);
-  const thumbCam = new THREE.PerspectiveCamera(30, 1, 0.1, 100);
+  let thumbRT = null, thumbBuf = null, thumbCanvas = null, thumbCtx = null, thumbImg = null, thumbCam = null;
+  function ensureThumbResources() {
+    if (thumbRT) return;
+    thumbRT = new THREE.WebGLRenderTarget(TH_SIZE, TH_SIZE, { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, encoding: THREE.sRGBEncoding });
+    thumbBuf = new Uint8Array(TH_SIZE * TH_SIZE * 4);
+    thumbCanvas = document.createElement("canvas");
+    thumbCanvas.width = thumbCanvas.height = TH_SIZE;
+    thumbCtx = thumbCanvas.getContext("2d");
+    thumbImg = thumbCtx.createImageData(TH_SIZE, TH_SIZE);
+    thumbCam = new THREE.PerspectiveCamera(30, 1, 0.1, 100);
+  }
 
   function thumb(i) {
     const L = levels[i];
     if (!L) return;
+    ensureThumbResources();
     const prevVis = levels.map((o) => (o ? o.group.visible : false));
     const prevBlob = blob.position.clone();
     const prevRing = focusRing.visible;
@@ -703,10 +738,7 @@
     if (imgEl) { imgEl.src = thumbCanvas.toDataURL("image/png"); imgEl.classList.add("ready"); }
   }
 
-  // ===== 起動：L1だけ先に組んで即表示 → 残りL2〜L5は裏で1つずつ組み立てる =====
-  renderCards();
-  renderFlowHud();
-  const bootStart = performance.now();
+  // ===== 起動：事前ベイク済みL1を即描画・操作可能に → 残りL2〜L5は裏で1つずつ読み込み・構築 =====
   const scheduleIdle = (fn) => {
     if (typeof window.requestIdleCallback === "function") window.requestIdleCallback(fn, { timeout: 120 });
     else setTimeout(fn, 35);
@@ -714,48 +746,99 @@
   function buildRemaining(idx) {
     if (idx >= 5) {
       if (!window.__liver.allBuiltMs) {
-        window.__liver.allBuiltMs = Math.round(performance.now() - bootStart);
+        window.__liver.allBuiltMs = Math.round(performance.now());
         console.info(`[LiverAtlas] allBuiltMs (L1-L5 ready): ${window.__liver.allBuiltMs} ms`, buildMs);
+      }
+      // 種・病態切替も即応できるよう裏で l1_variants を先読み
+      if (BK && !BK.isLoaded("l1_variants")) {
+        scheduleIdle(() => BK.loadChunk("l1_variants"));
       }
       return;
     }
     scheduleIdle(() => {
       if (trans) { setTimeout(() => buildRemaining(idx), 120); return; }
-      try {
-        ensure(idx);
-        thumb(idx);
-      } catch (err) { console.error(err); }
-      buildRemaining(idx + 1);
+      const snapKey = keyOf();
+      const loadP = BK ? BK.ensureFor(idx, state.species, state.path) : Promise.resolve();
+      loadP.then(() => {
+        if (trans || keyOf() !== snapKey) { setTimeout(() => buildRemaining(idx), 120); return; }
+        try {
+          ensure(idx);
+          thumb(idx);
+        } catch (err) { console.error(err); }
+        buildRemaining(idx + 1);
+      });
     });
   }
-  function boot() {
-    showLoader(true, "立体を組み立て中…");
-    setTimeout(() => {
-      try {
-        const L = ensure(0);
-        L.group.visible = true;
-        presetCam(L, true);
-        state.level = 0;
-        applyXray(L);
-        buildLabels();
-        renderPanel();
-        renderFlowHud();
-        syncNav();
-        resize();
-        showLoader(false);
-        window.__liver.bootMs = Math.round(performance.now() - bootStart);
-        console.info(`[LiverAtlas] bootMs (L1 interactive): ${window.__liver.bootMs} ms`);
-        requestAnimationFrame(frame);
-        setTimeout(() => {
-          try { thumb(0); } catch (err) { console.error(err); }
-          buildRemaining(1);
-        }, 60);
-      } catch (err) {
-        console.error(err);
-        showLoader(true, "組み立てに失敗しました：" + err.message);
-      }
-    }, 0);
+  function finishBoot(tBakedStart) {
+    try {
+      const tBakedDone = performance.now();
+      const L = ensure(0);
+      const tL1Done = performance.now();
+      L.group.visible = true;
+      presetCam(L, true);
+      state.level = 0;
+      applyXray(L);
+      renderCards();
+      renderPanel();
+      renderFlowHud();
+      syncNav();
+      buildLabels(true);
+      resize();
+      const tUiDone = performance.now();
+      // 最初の1フレームを即座に描画して本当に描画・操作可能な状態で計測を確定する
+      camera.position.set(
+        cam.target.x + cam.dist * Math.sin(cam.yaw) * Math.cos(cam.pitch),
+        cam.target.y + cam.dist * Math.sin(cam.pitch),
+        cam.target.z + cam.dist * Math.cos(cam.yaw) * Math.cos(cam.pitch)
+      );
+      camera.lookAt(cam.target);
+      renderer.render(scene, camera);
+      placeLabels();
+      showLoader(false);
+      const tFirstRender = performance.now();
+      const timing = {
+        headMs: Math.round(window.__BOOT_HEAD_MS || 0),
+        scriptsMs: Math.round(tScriptsDone),
+        glInitMs: Math.round(tGlDone - tScriptsDone),
+        envMs: Math.round(tEnvDone - tGlDone),
+        bakedMs: Math.round(tBakedDone - tBakedStart),
+        l1BuildMs: Math.round(tL1Done - tBakedDone),
+        uiMs: Math.round(tUiDone - tL1Done),
+        firstRenderMs: Math.round(tFirstRender - tUiDone),
+        totalBootMs: Math.round(tFirstRender)
+      };
+      window.__liver.bootTiming = timing;
+      window.__liver.bootMs = timing.totalBootMs;
+      console.info(`[LiverAtlas] bootMs (navStart -> L1 drawn & interactive): ${timing.totalBootMs} ms`, timing);
+      last = tFirstRender;
+      requestAnimationFrame(frame);
+      setTimeout(() => {
+        try { thumb(0); } catch (err) { console.error(err); }
+        buildRemaining(1);
+      }, 60);
+      setTimeout(() => {
+        if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
+          navigator.serviceWorker.register("sw.js").catch(() => {});
+        }
+      }, 1500);
+    } catch (err) {
+      console.error(err);
+      showLoader(true, "組み立てに失敗しました：" + err.message);
+    }
   }
-  window.__liver = { state, levels, goLevel, select, toggleXray, applyXray, setDrawer, resize, camera, renderer, bootMs: 0, allBuiltMs: 0, buildMs, isTransitioning: () => !!trans };
+  function boot() {
+    const tBakedStart = performance.now();
+    // file:// で <head> の先行ロードがすでに終わっていれば完全同期で即描画
+    if (BK && BK.isFile && BK.consumeB64("l1_mouse_normal")) {
+      finishBoot(tBakedStart);
+      return;
+    }
+    if (BK) {
+      BK.loadChunk("l1_mouse_normal").then(() => finishBoot(tBakedStart));
+    } else {
+      finishBoot(tBakedStart);
+    }
+  }
+  window.__liver = { state, levels, goLevel, select, toggleXray, applyXray, setDrawer, resize, camera, renderer, bootMs: 0, allBuiltMs: 0, buildMs, bootTiming: null, isTransitioning: () => !!trans };
   boot();
 })();

@@ -10,6 +10,26 @@
 <meta name="theme-color" content="#f6f0e6" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="mobile-web-app-capable" content="yes" />
+<link rel="preload" href="js/three.min.js" as="script" />
+<script>
+  window.__BOOT_HEAD_MS = performance.now();
+  if (location.protocol.startsWith("http")) {
+    window.__BAKED_PREFETCH = {
+      l1_mouse_normal: fetch("baked/l1_mouse_normal.bin").then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.arrayBuffer();
+      })
+    };
+  } else if (location.protocol === "file:") {
+    (function () {
+      var s = document.createElement("script");
+      s.src = "baked/l1_mouse_normal.js";
+      s.async = true;
+      window.__L1_FILE_PROMISE = new Promise(function (res, rej) { s.onload = res; s.onerror = rej; });
+      document.head.appendChild(s);
+    })();
+  }
+</script>
 <style>
   :root {
     --bg1: #fbf8f3; --bg2: #efe7dc;
@@ -270,17 +290,13 @@
   <div id="ticks"><button data-i="0">臓器</button><button data-i="1">小葉</button><button data-i="2">ゾーン</button><button data-i="3">細胞</button><button data-i="4">輸送体</button></div>
 </div>
 <div id="tip"></div>
-<div id="loader" class="on"><span>立体を組み立て中…</span></div>
+<div id="loader"><span>立体を組み立て中…</span></div>
 
 <script src="js/three.min.js"></script>
 <script src="js/data.js"></script>
 <script src="js/sdf.js"></script>
+<script src="js/baked.js"></script>
 <script src="js/levels.js"></script>
 <script src="js/main.js"></script>
-<script>
-  if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
-    navigator.serviceWorker.register("sw.js").catch(() => {});
-  }
-</script>
 </body>
 </html>

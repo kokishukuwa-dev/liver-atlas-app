@@ -3,6 +3,75 @@
   const S = window.SDF;
   const A = window.LiverApp;
   const H = S.hex;
+  const BK = () => window.LiverBaked;
+  const CAP = () => window.__BAKE_CAPTURE;
+  function bakedGeo(key, makeFn) {
+    const bk = BK();
+    if (bk && !CAP()) {
+      const hit = bk.get(key);
+      if (hit) return hit;
+    }
+    const g = makeFn();
+    g.userData.shared = true;
+    if (CAP()) CAP().onGeo(key, g);
+    return g;
+  }
+  function mergeMeshesWithColor(items) {
+    let totalV = 0, totalI = 0;
+    const prepared = items.map((it) => {
+      const m = it.mesh;
+      m.updateMatrix();
+      const g = m.geometry;
+      const nV = g.attributes.position.count;
+      const nI = g.index ? g.index.count : nV;
+      totalV += nV;
+      totalI += nI;
+      return { g, mat: m.matrix, nV, nI, col: it.colorHex !== undefined ? linCol(it.colorHex) : null };
+    });
+    const pos = new Float32Array(totalV * 3);
+    const nor = new Float32Array(totalV * 3);
+    const col = new Float32Array(totalV * 3);
+    const idx = totalV > 65535 ? new Uint32Array(totalI) : new Uint16Array(totalI);
+    const v = new THREE.Vector3(), n = new THREE.Vector3(), nm = new THREE.Matrix3();
+    let vOff = 0, iOff = 0;
+    for (const p of prepared) {
+      const gp = p.g.attributes.position;
+      const gn = p.g.attributes.normal;
+      const gc = p.g.attributes.color;
+      nm.getNormalMatrix(p.mat);
+      for (let i = 0; i < p.nV; i++) {
+        v.fromBufferAttribute(gp, i).applyMatrix4(p.mat);
+        const o3 = (vOff + i) * 3;
+        pos[o3] = v.x; pos[o3 + 1] = v.y; pos[o3 + 2] = v.z;
+        if (gn) {
+          n.fromBufferAttribute(gn, i).applyMatrix3(nm).normalize();
+          nor[o3] = n.x; nor[o3 + 1] = n.y; nor[o3 + 2] = n.z;
+        }
+        if (gc) {
+          col[o3] = gc.getX(i); col[o3 + 1] = gc.getY(i); col[o3 + 2] = gc.getZ(i);
+        } else if (p.col) {
+          col[o3] = p.col.r; col[o3 + 1] = p.col.g; col[o3 + 2] = p.col.b;
+        } else {
+          col[o3] = 1; col[o3 + 1] = 1; col[o3 + 2] = 1;
+        }
+      }
+      if (p.g.index) {
+        const gi = p.g.index.array;
+        for (let i = 0; i < p.nI; i++) idx[iOff + i] = gi[i] + vOff;
+      } else {
+        for (let i = 0; i < p.nI; i++) idx[iOff + i] = i + vOff;
+      }
+      vOff += p.nV;
+      iOff += p.nI;
+    }
+    const out = new THREE.BufferGeometry();
+    out.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+    out.setAttribute("normal", new THREE.BufferAttribute(nor, 3));
+    out.setAttribute("color", new THREE.BufferAttribute(col, 3));
+    out.setIndex(new THREE.BufferAttribute(idx, 1));
+    out.computeBoundingSphere();
+    return out;
+  }
 
   // ===== 共通の部品・質感（粘土〜樹脂の厚みと艶・白飛び抑制） =====
   const MAT = {
@@ -134,17 +203,27 @@
     onUpdate(fn) { this.updaters.push(fn); }
     add(obj, sid) { this.group.add(obj); if (sid) { obj.userData.sid = sid; this.pick.push(obj); } return obj; }
     build() {
-      const aoItems = this.specs.filter((s) => s.ao !== false).map((s) => ({
-        s, f: S.bounded(s.f, s.bmin, s.bmax, 0.32), bmin: s.bmin, bmax: s.bmax
-      }));
+      const bk = BK();
+      const cap = CAP();
+      const needLive = this.specs.some((s) => cap || !(s.bakeKey && bk && bk.has(s.bakeKey)));
+      let aoItems = null;
+      if (needLive) {
+        aoItems = this.specs.filter((s) => s.ao !== false).map((s) => ({
+          s, f: S.bounded(s.f, s.bmin, s.bmax, 0.32), bmin: s.bmin, bmax: s.bmax
+        }));
+      }
       for (const s of this.specs) {
-        const aoDist = s.aoDist || 0.22;
-        let aoFn = null;
-        if (s.ao !== false) {
-          const near = aoItems.filter((it) => boxOverlap(s.bmin, s.bmax, it.bmin, it.bmax, aoDist + 0.1)).map((it) => it.f);
-          aoFn = near.length === 1 ? near[0] : (x, y, z) => { let d = 1e9; for (let i = 0; i < near.length; i++) { const v = near[i](x, y, z); if (v < d) d = v; } return d; };
+        let g = (!cap && s.bakeKey && bk) ? bk.get(s.bakeKey) : null;
+        if (!g) {
+          const aoDist = s.aoDist || 0.22;
+          let aoFn = null;
+          if (s.ao !== false && aoItems) {
+            const near = aoItems.filter((it) => boxOverlap(s.bmin, s.bmax, it.bmin, it.bmax, aoDist + 0.1)).map((it) => it.f);
+            aoFn = near.length === 1 ? near[0] : (x, y, z) => { let d = 1e9; for (let i = 0; i < near.length; i++) { const v = near[i](x, y, z); if (v < d) d = v; } return d; };
+          }
+          g = S.mesh(s.f, s.bmin, s.bmax, s.res || 84, { color: s.color, ao: aoFn, aoDist, aoMin: s.aoMin, skipInterior: s.skipInterior });
+          if (cap && s.bakeKey) cap.onGeo(s.bakeKey, g);
         }
-        const g = S.mesh(s.f, s.bmin, s.bmax, s.res || 84, { color: s.color, ao: aoFn, aoDist, aoMin: s.aoMin, skipInterior: s.skipInterior });
         const m = new THREE.Mesh(g, s.material || mat(s.mat, s.matx));
         m.castShadow = s.cast !== false; m.receiveShadow = true;
         s.mesh = m;
@@ -207,122 +286,136 @@
   function geoSphere(r, seg) { const k = "s" + r + "_" + (seg || 14); return GEO[k] || (GEO[k] = shared(new THREE.SphereGeometry(r, seg || 14, Math.max(8, Math.round((seg || 14) * 0.75))))); }
   function geoDisc() { // 赤血球（両凹円盤）
     if (GEO.rbc) return GEO.rbc;
-    const f = (x, y, z) => {
-      const q = Math.hypot(x, z);
-      const ring = Math.hypot(q - 0.11, y) - 0.06;
-      const disc = Math.max(q - 0.15, Math.abs(y) - 0.028);
-      return S.smin(ring, disc, 0.04);
-    };
-    return (GEO.rbc = shared(S.mesh(f, [-0.2, -0.1, -0.2], [0.2, 0.1, 0.2], 30, { color: H(0xffffff) })));
+    return (GEO.rbc = bakedGeo("sh_rbc", () => {
+      const f = (x, y, z) => {
+        const q = Math.hypot(x, z);
+        const ring = Math.hypot(q - 0.11, y) - 0.06;
+        const disc = Math.max(q - 0.15, Math.abs(y) - 0.028);
+        return S.smin(ring, disc, 0.04);
+      };
+      return S.mesh(f, [-0.2, -0.1, -0.2], [0.2, 0.1, 0.2], 30, { color: H(0xffffff) });
+    }));
   }
   function geoBlob(r, amp, seed) {
     const k = "b" + r + amp + seed; if (GEO[k]) return GEO[k];
-    const f = S.displace(S.sphere([0, 0, 0], r), amp, 6 / r * 0.25 + seed);
-    return (GEO[k] = shared(S.mesh(f, [-r * 1.4, -r * 1.4, -r * 1.4], [r * 1.4, r * 1.4, r * 1.4], 34, { color: H(0xffffff) })));
+    return (GEO[k] = bakedGeo("sh_blob_" + r + "_" + amp + "_" + seed, () => {
+      const f = S.displace(S.sphere([0, 0, 0], r), amp, 6 / r * 0.25 + seed);
+      return S.mesh(f, [-r * 1.4, -r * 1.4, -r * 1.4], [r * 1.4, r * 1.4, r * 1.4], 34, { color: H(0xffffff) });
+    }));
   }
   // 手本風：切り欠きミトコンドリア（鮮やかなオレンジ外膜＋内側のクリステ皺）
   function geoMito() {
     if (GEO.mito) return GEO.mito;
-    const outer = S.capsule([-0.105, 0, 0], [0.105, 0, 0], 0.068);
-    const f = (x, y, z) => {
-      let d = outer(x, y, z);
-      // 正面(+z)を浅く切り欠いてクリステの波を見せる
-      if (z > 0.015) {
-        const inner = S.capsule([-0.088, 0, 0], [0.088, 0, 0], 0.052)(x, y, z);
-        const crista = Math.sin(x * 78 + Math.sin(y * 38) * 1.1) * 0.014;
-        d = Math.max(d, Math.min(z - (0.028 + crista), -inner));
-      }
-      return d;
-    };
-    return (GEO.mito = shared(S.mesh(f, [-0.2, -0.095, -0.095], [0.2, 0.095, 0.095], 44, {
-      color: (x, y, z) => {
-        if (z > 0.018 && Math.abs(y) < 0.048 && Math.abs(x) < 0.14) {
-          const w = Math.sin(x * 78 + Math.sin(y * 38) * 1.1);
-          return w > 0.15 ? H(0xffcf7a) : H(0xc94d18);
+    return (GEO.mito = bakedGeo("sh_mito", () => {
+      const outer = S.capsule([-0.105, 0, 0], [0.105, 0, 0], 0.068);
+      const f = (x, y, z) => {
+        let d = outer(x, y, z);
+        // 正面(+z)を浅く切り欠いてクリステの波を見せる
+        if (z > 0.015) {
+          const inner = S.capsule([-0.088, 0, 0], [0.088, 0, 0], 0.052)(x, y, z);
+          const crista = Math.sin(x * 78 + Math.sin(y * 38) * 1.1) * 0.014;
+          d = Math.max(d, Math.min(z - (0.028 + crista), -inner));
         }
-        return S.mix(H(0xe46828), H(0xf58e42), S.noise(x * 16, y * 16, z * 16));
-      },
-      aoDist: 0.06
-    })));
+        return d;
+      };
+      return S.mesh(f, [-0.2, -0.095, -0.095], [0.2, 0.095, 0.095], 44, {
+        color: (x, y, z) => {
+          if (z > 0.018 && Math.abs(y) < 0.048 && Math.abs(x) < 0.14) {
+            const w = Math.sin(x * 78 + Math.sin(y * 38) * 1.1);
+            return w > 0.15 ? H(0xffcf7a) : H(0xc94d18);
+          }
+          return S.mix(H(0xe46828), H(0xf58e42), S.noise(x * 16, y * 16, z * 16));
+        },
+        aoDist: 0.06
+      });
+    }));
   }
   // 手本風：1/4切り欠き核（核膜孔・クロマチン断面・核小体）
   function geoNucleus() {
     if (GEO.nuc) return GEO.nuc;
-    const f = (x, y, z) => {
-      const sp = Math.hypot(x, y, z) - 0.27;
-      // 右上(+x,+y,+z)を切り欠く
-      const cut = Math.min(x + 0.01, y + 0.01, z + 0.02);
-      const shell = Math.max(sp, cut);
-      const nucleolus = Math.hypot(x - 0.02, y - 0.02, z - 0.02) - 0.092;
-      return Math.min(shell, nucleolus);
-    };
-    return (GEO.nuc = shared(S.mesh(f, [-0.31, -0.31, -0.31], [0.31, 0.31, 0.31], 56, {
-      color: (x, y, z) => {
-        const r = Math.hypot(x - 0.02, y - 0.02, z - 0.02);
-        if (r < 0.102) return S.mix(H(0x43207a), H(0x6338a8), S.noise(x * 36, y * 36, z * 36));
-        const r0 = Math.hypot(x, y, z);
-        if (r0 < 0.245) {
-          // 切り欠き断面：繊細なクロマチン粒状模様
-          const ch = S.fbm(x * 28, y * 28, z * 28);
-          return S.mix(H(0x8860cf), H(0xc2a4f5), ch);
-        }
-        // 外膜：核膜孔の微小な窪み色
-        const pore = S.cellPattern(x * 16, y * 16, z * 16);
-        const base = S.mix(H(0x6e42bd), H(0x8c62d9), S.noise(x * 14, y * 14, z * 14));
-        return pore > 0.42 ? S.mix(base, H(0x4b288f), 0.55) : base;
-      },
-      aoDist: 0.12, aoMin: 0.34
-    })));
+    return (GEO.nuc = bakedGeo("sh_nuc", () => {
+      const f = (x, y, z) => {
+        const sp = Math.hypot(x, y, z) - 0.27;
+        // 右上(+x,+y,+z)を切り欠く
+        const cut = Math.min(x + 0.01, y + 0.01, z + 0.02);
+        const shell = Math.max(sp, cut);
+        const nucleolus = Math.hypot(x - 0.02, y - 0.02, z - 0.02) - 0.092;
+        return Math.min(shell, nucleolus);
+      };
+      return S.mesh(f, [-0.31, -0.31, -0.31], [0.31, 0.31, 0.31], 56, {
+        color: (x, y, z) => {
+          const r = Math.hypot(x - 0.02, y - 0.02, z - 0.02);
+          if (r < 0.102) return S.mix(H(0x43207a), H(0x6338a8), S.noise(x * 36, y * 36, z * 36));
+          const r0 = Math.hypot(x, y, z);
+          if (r0 < 0.245) {
+            // 切り欠き断面：繊細なクロマチン粒状模様
+            const ch = S.fbm(x * 28, y * 28, z * 28);
+            return S.mix(H(0x8860cf), H(0xc2a4f5), ch);
+          }
+          // 外膜：核膜孔の微小な窪み色
+          const pore = S.cellPattern(x * 16, y * 16, z * 16);
+          const base = S.mix(H(0x6e42bd), H(0x8c62d9), S.noise(x * 14, y * 14, z * 14));
+          return pore > 0.42 ? S.mix(base, H(0x4b288f), 0.55) : base;
+        },
+        aoDist: 0.12, aoMin: 0.34
+      });
+    }));
   }
   // 手本風：核を取り巻く粗面小胞体（鮮やかなコバルトブルーの層状リボン）
   function geoRER() {
     if (GEO.rer) return GEO.rer;
-    const f = (x, y, z) => {
-      let d = 1e9;
-      const r = Math.hypot(x, y), a = Math.atan2(y, x);
-      const wave = 0.012 * Math.sin(a * 14);
-      for (const R0 of [0.33, 0.395, 0.46]) {
-        const arc = Math.hypot(r - (R0 + wave), z) - 0.023;
-        d = Math.min(d, arc);
-      }
-      // 半周＋折り返し
-      const da = Math.abs(a - 2.35);
-      return Math.max(d, da - 1.15);
-    };
-    return (GEO.rer = shared(S.mesh(f, [-0.56, -0.35, -0.06], [0.22, 0.56, 0.06], 62, {
-      color: (x, y, z) => {
-        const ribo = S.noise(x * 64, y * 64, z * 64);
-        return ribo > 0.68 ? H(0x9fc2ff) : S.mix(H(0x3f67cc), H(0x648be8), S.noise(x * 18, y * 18, z * 18));
-      },
-      aoDist: 0.08
-    })));
+    return (GEO.rer = bakedGeo("sh_rer", () => {
+      const f = (x, y, z) => {
+        let d = 1e9;
+        const r = Math.hypot(x, y), a = Math.atan2(y, x);
+        const wave = 0.012 * Math.sin(a * 14);
+        for (const R0 of [0.33, 0.395, 0.46]) {
+          const arc = Math.hypot(r - (R0 + wave), z) - 0.023;
+          d = Math.min(d, arc);
+        }
+        // 半周＋折り返し
+        const da = Math.abs(a - 2.35);
+        return Math.max(d, da - 1.15);
+      };
+      return S.mesh(f, [-0.56, -0.35, -0.06], [0.22, 0.56, 0.06], 62, {
+        color: (x, y, z) => {
+          const ribo = S.noise(x * 64, y * 64, z * 64);
+          return ribo > 0.68 ? H(0x9fc2ff) : S.mix(H(0x3f67cc), H(0x648be8), S.noise(x * 18, y * 18, z * 18));
+        },
+        aoDist: 0.08
+      });
+    }));
   }
   // 手本風：ゴルジ体（ピンク〜コーラルの重なりリボン）
   function geoGolgi() {
     if (GEO.golgi) return GEO.golgi;
-    const f = (x, y, z) => {
-      let d = 1e9;
-      for (let k = 0; k < 4; k++) {
-        const y0 = (k - 1.5) * 0.044;
-        const len = 0.11 - Math.abs(k - 1.5) * 0.015;
-        const bend = 0.032 * (x * x) / (len * len + 0.001);
-        const dx = Math.max(Math.abs(x) - len, 0);
-        d = Math.min(d, Math.hypot(dx, y - (y0 + bend), z) - 0.016);
-      }
-      return d;
-    };
-    return (GEO.golgi = shared(S.mesh(f, [-0.16, -0.12, -0.05], [0.16, 0.15, 0.05], 40, {
-      color: (x, y) => S.mix(H(0xe86d8a), H(0xf7a4b4), 0.5 + y * 3),
-      aoDist: 0.06
-    })));
+    return (GEO.golgi = bakedGeo("sh_golgi", () => {
+      const f = (x, y, z) => {
+        let d = 1e9;
+        for (let k = 0; k < 4; k++) {
+          const y0 = (k - 1.5) * 0.044;
+          const len = 0.11 - Math.abs(k - 1.5) * 0.015;
+          const bend = 0.032 * (x * x) / (len * len + 0.001);
+          const dx = Math.max(Math.abs(x) - len, 0);
+          d = Math.min(d, Math.hypot(dx, y - (y0 + bend), z) - 0.016);
+        }
+        return d;
+      };
+      return S.mesh(f, [-0.16, -0.12, -0.05], [0.16, 0.15, 0.05], 40, {
+        color: (x, y) => S.mix(H(0xe86d8a), H(0xf7a4b4), 0.5 + y * 3),
+        aoDist: 0.06
+      });
+    }));
   }
 
   // 流れの向きを示す滑らかな3D矢印（+X向き）
   function geoArrow() {
     if (GEO.arrow) return GEO.arrow;
-    const shaft = S.capsule([-0.085, 0, 0], [0.015, 0, 0], 0.018, 0.018);
-    const head = S.capsule([0.005, 0, 0], [0.095, 0, 0], 0.044, 0.004);
-    return (GEO.arrow = shared(S.mesh(S.union([shaft, head], 0.012), [-0.115, -0.058, -0.058], [0.115, 0.058, 0.058], 24, { color: H(0xffffff) })));
+    return (GEO.arrow = bakedGeo("sh_arrow", () => {
+      const shaft = S.capsule([-0.085, 0, 0], [0.015, 0, 0], 0.018, 0.018);
+      const head = S.capsule([0.005, 0, 0], [0.095, 0, 0], 0.044, 0.004);
+      return S.mesh(S.union([shaft, head], 0.012), [-0.115, -0.058, -0.058], [0.115, 0.058, 0.058], 24, { color: H(0xffffff) });
+    }));
   }
 
   // IgA抗体ジオメトリ（単量体Y字×2をFc側でJ鎖結合した二量体IgA、pIgR結合型、分泌成分SC巻き付きSIgA）
@@ -341,50 +434,56 @@
   }
   function geoDimericIgA() {
     if (GEO.dIga) return GEO.dIga;
-    const f = makeDimerIgAFn();
-    return (GEO.dIga = shared(S.mesh(f, [-0.145, -0.085, -0.042], [0.145, 0.085, 0.042], 34, {
-      color: (x, y) => {
-        if (Math.abs(x) < 0.024 && y < 0.016) return H(0xf2be38); // J鎖（金黄）
-        return Math.abs(x) > 0.068 ? H(0xd64cb2) : H(0x9c3d8a);   // Fab腕・Fc幹（#9c3d8a系）
-      },
-      aoDist: 0.04, skipInterior: true
-    })));
+    return (GEO.dIga = bakedGeo("sh_dIga", () => {
+      const f = makeDimerIgAFn();
+      return S.mesh(f, [-0.145, -0.085, -0.042], [0.145, 0.085, 0.042], 34, {
+        color: (x, y) => {
+          if (Math.abs(x) < 0.024 && y < 0.016) return H(0xf2be38); // J鎖（金黄）
+          return Math.abs(x) > 0.068 ? H(0xd64cb2) : H(0x9c3d8a);   // Fab腕・Fc幹（#9c3d8a系）
+        },
+        aoDist: 0.04, skipInterior: true
+      });
+    }));
   }
   function geoIgApIgR() {
     if (GEO.igaPigr) return GEO.igaPigr;
-    const base = makeDimerIgAFn();
-    // pIgR（受容体：Fc・J鎖側を抱え込むティール色の柄）
-    const pigr = S.union([
-      S.capsule([-0.042, -0.025, 0], [0.042, -0.025, 0], 0.012, 0.012),
-      S.capsule([0, -0.025, 0], [0, -0.072, 0], 0.011, 0.013)
-    ], 0.01);
-    return (GEO.igaPigr = shared(S.mesh((x, y, z) => S.smin(base(x, y, z), pigr(x, y, z), 0.008), [-0.145, -0.095, -0.045], [0.145, 0.085, 0.045], 34, {
-      color: (x, y, z) => {
-        if (pigr(x, y, z) < base(x, y, z) + 0.003) return H(0x28b8a0); // pIgR（ミントティール）
-        if (Math.abs(x) < 0.024 && y < 0.016) return H(0xf2be38);
-        return Math.abs(x) > 0.068 ? H(0xd64cb2) : H(0x9c3d8a);
-      },
-      aoDist: 0.04, skipInterior: true
-    })));
+    return (GEO.igaPigr = bakedGeo("sh_igaPigr", () => {
+      const base = makeDimerIgAFn();
+      // pIgR（受容体：Fc・J鎖側を抱え込むティール色の柄）
+      const pigr = S.union([
+        S.capsule([-0.042, -0.025, 0], [0.042, -0.025, 0], 0.012, 0.012),
+        S.capsule([0, -0.025, 0], [0, -0.072, 0], 0.011, 0.013)
+      ], 0.01);
+      return S.mesh((x, y, z) => S.smin(base(x, y, z), pigr(x, y, z), 0.008), [-0.145, -0.095, -0.045], [0.145, 0.085, 0.045], 34, {
+        color: (x, y, z) => {
+          if (pigr(x, y, z) < base(x, y, z) + 0.003) return H(0x28b8a0); // pIgR（ミントティール）
+          if (Math.abs(x) < 0.024 && y < 0.016) return H(0xf2be38);
+          return Math.abs(x) > 0.068 ? H(0xd64cb2) : H(0x9c3d8a);
+        },
+        aoDist: 0.04, skipInterior: true
+      });
+    }));
   }
   function geoSecretoryIgA() {
     if (GEO.sIga) return GEO.sIga;
-    const base = makeDimerIgAFn();
-    // 分泌成分（SC）：二量体の中央Fc・J鎖まわりを斜めに巻く細い帯（明るいアクアティール）
-    const scBand = S.union([
-      S.xf(S.torus([0, 0, 0], 0.026, 0.0095, "x"), [-0.018, 0, 0], [0, 26, 18]),
-      S.xf(S.torus([0, 0, 0], 0.026, 0.0095, "x"), [0.018, 0, 0], [0, -26, -18]),
-      S.capsule([-0.044, 0.018, 0.018], [0.044, -0.018, 0.018], 0.0095, 0.0095),
-      S.capsule([-0.044, -0.018, -0.018], [0.044, 0.018, -0.018], 0.0095, 0.0095)
-    ], 0.008);
-    return (GEO.sIga = shared(S.mesh((x, y, z) => S.smin(base(x, y, z), scBand(x, y, z), 0.006), [-0.145, -0.085, -0.052], [0.145, 0.085, 0.052], 36, {
-      color: (x, y, z) => {
-        if (scBand(x, y, z) < base(x, y, z) + 0.003) return H(0x2ce0b8); // 分泌成分SC（明るいシアン緑の帯）
-        if (Math.abs(x) < 0.024 && y < 0.016) return H(0xf2be38);
-        return Math.abs(x) > 0.068 ? H(0xd64cb2) : H(0x9c3d8a);
-      },
-      aoDist: 0.04, skipInterior: true
-    })));
+    return (GEO.sIga = bakedGeo("sh_sIga", () => {
+      const base = makeDimerIgAFn();
+      // 分泌成分（SC）：二量体の中央Fc・J鎖まわりを斜めに巻く細い帯（明るいアクアティール）
+      const scBand = S.union([
+        S.xf(S.torus([0, 0, 0], 0.026, 0.0095, "x"), [-0.018, 0, 0], [0, 26, 18]),
+        S.xf(S.torus([0, 0, 0], 0.026, 0.0095, "x"), [0.018, 0, 0], [0, -26, -18]),
+        S.capsule([-0.044, 0.018, 0.018], [0.044, -0.018, 0.018], 0.0095, 0.0095),
+        S.capsule([-0.044, -0.018, -0.018], [0.044, 0.018, -0.018], 0.0095, 0.0095)
+      ], 0.008);
+      return S.mesh((x, y, z) => S.smin(base(x, y, z), scBand(x, y, z), 0.006), [-0.145, -0.085, -0.052], [0.145, 0.085, 0.052], 36, {
+        color: (x, y, z) => {
+          if (scBand(x, y, z) < base(x, y, z) + 0.003) return H(0x2ce0b8); // 分泌成分SC（明るいシアン緑の帯）
+          if (Math.abs(x) < 0.024 && y < 0.016) return H(0xf2be38);
+          return Math.abs(x) > 0.068 ? H(0xd64cb2) : H(0x9c3d8a);
+        },
+        aoDist: 0.04, skipInterior: true
+      });
+    }));
   }
 
   // 肝実質の色（小葉模様のかすかな斑＋自然な色調むら）
@@ -449,6 +548,7 @@
     const tintAmt = bdl ? 0.42 : gs ? 0.14 : 0;
     const baseLiverCol = human ? liverSurfaceColor(0x943225, 0xc4513c, 0xb09036, tintAmt) : liverSurfaceColor(0x82251e, 0xb24234, 0xa88632, tintAmt);
     B.part({
+      bakeKey: `l1_liver_${sp}_${pt}`,
       sid: human ? "liver_lobe_human" : "liver_lobe_mouse", parenchyma: true, f: liver, bmin: lbm, bmax: lbx, res: 90, skipInterior: true, mat: "wet",
       color: human ? (x, y, z) => {
         let c = baseLiverCol(x, y, z);
@@ -470,6 +570,7 @@
     const gbF = S.displace(S.union([S.sphere(fundus, gbR), S.capsule(fundus, neck, gbR * 0.84, 0.105)], 0.12), 0.012, 8);
     const gbT = gs || !human;
     B.part({
+      bakeKey: `l1_gb_${sp}_${pt}`,
       sid: "gallbladder", f: gbF, ...bbPts([fundus, neck], gbR + 0.12), res: 48, skipInterior: true, mat: "gloss",
       color: (x, y, z) => S.mix(H(bdl ? 0x227036 : 0x2aa85e), H(0x7fd172), S.fbm(x * 3.5, y * 3.5, z * 3.5) * 0.7),
       matx: gbT ? { transparent: true, opacity: 0.56, depthWrite: false, clearcoat: 1.0, roughness: 0.14 } : { clearcoat: 1.0, roughness: 0.16 }, cast: !gbT
@@ -477,7 +578,7 @@
     if (gs) {
       const st = [[0, 0, 0], [0.11, 0.07, -0.04], [-0.09, 0.09, 0.05], [0.03, -0.10, 0.07]].map((o) => [fundus[0] + o[0], fundus[1] + o[1], fundus[2] + o[2]]);
       const stones = S.displace(S.union(st.map((c, i) => S.sphere(c, 0.098 - i * 0.011)), 0), 0.038, 10);
-      B.part({ sid: "gallstone_gb", f: stones, ...bbPts(st, 0.16), res: 42, mat: "clay", color: (x, y, z) => S.mix(H(0xd8a23e), H(0x724f1e), S.noise(x * 20, y * 20, z * 20)) });
+      B.part({ bakeKey: `l1_stgb_${sp}`, sid: "gallstone_gb", f: stones, ...bbPts(st, 0.16), res: 42, mat: "clay", color: (x, y, z) => S.mix(H(0xd8a23e), H(0x724f1e), S.noise(x * 20, y * 20, z * 20)) });
     }
 
     // 胆管系（肝内分枝→左右肝管→総肝管＋胆嚢管→総胆管：解剖通り画面左・右寄り）
@@ -486,140 +587,177 @@
     const lig = [-0.10, -1.70, 0.34];
     const papilla = [-0.38, -2.60, 0.32];
     const cyst = human ? [neck, [-0.24, -1.10, 0.45], jn] : [neck, [-0.18, -1.12, 0.50], jn];
-    // 胆管系・門脈・肝動脈・肝静脈の共有マテリアル（ドローコール＆シェーダ初期化を大幅削減）
+    // 胆管系・門脈・肝動脈・肝静脈（事前ベイク済み統合メッシュがあれば0.2ms・9ドローコールで即配置）
     const bileMatX = { roughness: 0.16, clearcoat: 1.0 };
     const pvCol = 0x6f5ed8, haCol = 0xe03a32, ivcCol = 0x3b72cc, bdCol = 0x2aa85e;
-    const mBileHD = matSolid("gloss", bdCol, bileMatX);
-    const mBileCBD = matSolid("gloss", bdCol, bileMatX);
-    const mPV = matSolid("wet", pvCol);
-    const mHA = matSolid("wet", haCol);
-    const mHV = matSolid("wet", ivcCol);
-    const addBileBranch = (pts, ra, rb, sid, segs, intra) => B.add(makeTaperTube(pts, ra, rb, segs || 14, intra ? 8 : 10, bdCol, "gloss", bileMatX, sid === "cbd" ? mBileCBD : mBileHD, intra), sid);
-    // 左右肝管＋肝内への枝分かれ（門脈・肝動脈と並走するグリソン鞘系統）
-    addBileBranch([hilumR, chd0, jn], up, up, "hepatic_ducts");
-    addBileBranch([hilumL, chd0], up * 0.92, up, "hepatic_ducts");
-    addBileBranch(cyst, up * 0.78, up * 0.85, "hepatic_ducts");
-    // 総胆管（BDLでは結紮部上流が拡張・下流は細い、胆石では結石上流が拡張）
-    const cbdSegs = [
-      { pts: [jn, lig], ra: up, rb: up },
-      { pts: [lig, [-0.08, -1.86, 0.33], [-0.14, -2.34, 0.30]], ra: bdl ? r0 : up, rb: bdl ? r0 : gs ? up * 0.95 : r0 },
-      { pts: [[-0.14, -2.34, 0.30], papilla], ra: r0, rb: r0 * 0.92 }
+    const vesselDefs = [
+      { key: `l1_v_hd_ext_${sp}_${pt}`, sid: "hepatic_ducts", kind: "gloss", extra: bileMatX, cast: true, recv: true },
+      { key: `l1_v_hd_int_${sp}_${pt}`, sid: "hepatic_ducts", kind: "gloss", extra: bileMatX, cast: false, recv: false },
+      { key: `l1_v_cbd_${pt}`, sid: "cbd", kind: "gloss", extra: bileMatX, cast: true, recv: true },
+      { key: "l1_v_pv_ext", sid: "portal_vein", kind: "wet", extra: null, cast: true, recv: true },
+      { key: `l1_v_pv_int_${sp}`, sid: "portal_vein", kind: "wet", extra: null, cast: false, recv: false },
+      { key: `l1_v_ha_ext_${sp}`, sid: "hepatic_artery", kind: "wet", extra: null, cast: true, recv: true },
+      { key: `l1_v_ha_int_${sp}`, sid: "hepatic_artery", kind: "wet", extra: null, cast: false, recv: false },
+      { key: "l1_v_hv_ext", sid: "hepatic_vein", kind: "wet", extra: null, cast: true, recv: true },
+      { key: `l1_v_hv_int_${sp}`, sid: "hepatic_vein", kind: "wet", extra: null, cast: false, recv: false },
     ];
-    cbdSegs.forEach((sg) => addBileBranch(sg.pts, sg.ra, sg.rb, "cbd"));
-
-    // 門脈（後ろ側 z<0・肝門部で左右枝＋さらに区域枝へ分枝）
-    const pv = [[0.40, -3.55, -0.22], [0.35, -2.80, -0.28], [0.16, -2.00, -0.24], [0.06, -1.20, -0.18], [0.02, -0.74, -0.12]];
-    const smv = [[1.25, -3.85, 0.0], [0.62, -3.70, -0.15], [0.40, -3.55, -0.22]];
-    const spl = [[0.35, -2.80, -0.28], [1.02, -2.68, -0.46], [1.78, -2.52, -0.56]];
-    const imv = [[1.02, -2.68, -0.46], [1.10, -3.15, -0.44], [1.16, -3.52, -0.40]];
-    const capEnd = (pos, r, mMat, sid) => { const m = new THREE.Mesh(geoSphere(r, 10), mMat); m.position.set(pos[0], pos[1], pos[2]); B.add(m, sid); };
-    B.add(makeTaperTube(pv, 0.145, 0.135, 20, 12, pvCol, "wet", null, mPV), "portal_vein");
-    B.add(makeTaperTube(smv, 0.095, 0.12, 12, 10, pvCol, "wet", null, mPV), "portal_vein");
-    B.add(makeTaperTube(spl, 0.11, 0.085, 12, 10, pvCol, "wet", null, mPV), "portal_vein");
-    B.add(makeTaperTube(imv, 0.068, 0.048, 10, 10, pvCol, "wet", null, mPV), "portal_vein");
-    capEnd(spl[2], 0.084, mPV, "portal_vein"); capEnd(imv[2], 0.047, mPV, "portal_vein");
-
-    // 固有肝動脈（解剖通り画面右・左寄り：左右肝動脈＋胆嚢動脈枝＋胃十二指腸動脈枝）
-    const ha = [[1.62, -2.25, -0.04], [0.92, -1.98, 0.06], [0.38, -1.58, 0.16], [0.22, -1.14, 0.22], [0.14, -0.74, 0.18]];
-    B.add(makeTaperTube(ha, 0.056, 0.046, 18, 10, haCol, "wet", null, mHA), "hepatic_artery");
-    capEnd(ha[0], 0.055, mHA, "hepatic_artery");
-    B.add(makeTaperTube([[0.38, -1.58, 0.16], [0.24, -1.92, 0.26], [0.16, -2.28, 0.24]], 0.042, 0.028, 10, 8, haCol, "wet", null, mHA), "hepatic_artery");
-    // 胆嚢動脈（右肝動脈→胆嚢頸部）
-    B.add(makeTaperTube([[-0.22, -0.64, 0.18], [-0.28, -0.78, 0.36], [neck[0] + 0.04, neck[1] - 0.05, neck[2] + 0.06]], 0.024, 0.016, 8, 8, haCol, "wet", null, mHA), "hepatic_artery");
-
-    // 肝内の門脈域分枝（門脈・肝動脈・胆管が並走：透過モードで立体的に見える。肝内なので影投影はオフ）
-    const bileDil = 1 + (up / r0 - 1) * 0.68;
-    const shiftPts = (pts, dx, dy, dz) => pts.map((p) => [p[0] + dx, p[1] + dy, p[2] + dz]);
-    const capTip = (pt, r, mMat, sid) => { const m = new THREE.Mesh(geoSphere(r, 8), mMat); m.position.set(pt[0], pt[1], pt[2]); B.add(m, sid); };
-    const addTriad = (pts, pvA, pvB, haA, haB, bdA, bdB, segs) => {
-      const nSeg = Math.max(8, Math.round((segs || 12) * 0.8));
-      const haPts = shiftPts(pts, 0.040, -0.022, 0.054);
-      const bdPts = shiftPts(pts, -0.030, 0.034, 0.064);
-      B.add(makeTaperTube(pts, pvA, pvB, nSeg, 8, pvCol, "wet", null, mPV, true), "portal_vein");
-      B.add(makeTaperTube(haPts, haA, haB, nSeg, 7, haCol, "wet", null, mHA, true), "hepatic_artery");
-      addBileBranch(bdPts, bdA * bileDil, bdB * bileDil, "hepatic_ducts", nSeg, true);
-      const end = pts.length - 1;
-      capTip(pts[end], pvB * 0.96, mPV, "portal_vein");
-      capTip(haPts[end], haB * 0.96, mHA, "hepatic_artery");
-      capTip(bdPts[end], bdB * bileDil * 0.96, mBileHD, "hepatic_ducts");
-    };
-    // 肝門部から左右の1次枝へ滑らかに接続
-    B.add(makeTaperTube([[0.02, -0.74, -0.12], [-0.36, -0.58, -0.12], [-0.72, -0.46, -0.12]], 0.118, 0.095, 10, 10, pvCol, "wet", null, mPV, true), "portal_vein");
-    B.add(makeTaperTube([[0.02, -0.74, -0.12], [0.38, -0.58, -0.11], [0.76, -0.44, -0.10]], 0.110, 0.088, 10, 10, pvCol, "wet", null, mPV, true), "portal_vein");
-    B.add(makeTaperTube([[0.14, -0.74, 0.18], [-0.38, -0.56, 0.14], [-0.68, -0.48, -0.06]], 0.042, 0.032, 10, 8, haCol, "wet", null, mHA, true), "hepatic_artery");
-    B.add(makeTaperTube([[0.14, -0.74, 0.18], [0.50, -0.54, 0.12], [0.80, -0.46, -0.04]], 0.040, 0.030, 10, 8, haCol, "wet", null, mHA, true), "hepatic_artery");
-    addBileBranch([hilumR, [-0.64, -0.50, 0.06], [-0.75, -0.42, -0.05]], up * 0.78, up * 0.62, "hepatic_ducts", 10, true);
-    addBileBranch([hilumL, [0.56, -0.48, 0.08], [0.73, -0.40, -0.03]], up * 0.72, up * 0.58, "hepatic_ducts", 10, true);
-
-    // 肝静脈（別系統：小葉間・区域間を走り下大静脈 IVC へ注ぐ）
-    const ivcMesh = new THREE.Mesh(hollowCylGeo(0.25, 0.18, 5.42, 20, ivcCol, 0x1e3c72), mat("wet"));
-    ivcMesh.position.set(-0.60, -0.73, -0.94); ivcMesh.castShadow = true; ivcMesh.receiveShadow = true;
-    B.add(ivcMesh, "hepatic_vein");
-    const addHV = (pts, ra, rb, segs) => {
-      B.add(makeTaperTube(pts, ra, rb, Math.max(8, Math.round((segs || 12) * 0.8)), 8, ivcCol, "wet", null, mHV, true), "hepatic_vein");
-      capTip(pts[pts.length - 1], rb * 0.96, mHV, "hepatic_vein");
-    };
-
-    if (human) {
-      // ヒト肝内グリソン鞘（右前S8/S5・右後S7/S6・左外側S2/S3・左内側S4＋自然な曲線3次枝）
-      addTriad([[-0.72, -0.46, -0.12], [-1.14, 0.02, 0.18], [-1.36, 0.62, 0.34], [-1.22, 0.96, 0.24]], 0.088, 0.024, 0.030, 0.011, 0.036, 0.013, 14);
-      addTriad([[-1.14, 0.02, 0.18], [-0.94, 0.36, 0.36], [-0.82, 0.74, 0.42]], 0.052, 0.020, 0.020, 0.009, 0.024, 0.011, 10);
-      addTriad([[-1.14, 0.02, 0.18], [-1.52, -0.26, 0.34], [-1.86, -0.52, 0.20]], 0.056, 0.020, 0.021, 0.009, 0.025, 0.011, 10);
-      addTriad([[-0.72, -0.46, -0.12], [-1.34, -0.08, -0.22], [-1.96, 0.24, -0.22], [-2.22, 0.48, -0.14]], 0.084, 0.024, 0.028, 0.010, 0.034, 0.012, 14);
-      addTriad([[-1.34, -0.08, -0.22], [-1.54, 0.38, -0.22], [-1.68, 0.84, -0.14]], 0.050, 0.020, 0.019, 0.009, 0.023, 0.010, 10);
-      addTriad([[-1.34, -0.08, -0.22], [-1.62, -0.32, -0.28], [-1.88, -0.56, -0.30]], 0.052, 0.020, 0.020, 0.009, 0.024, 0.010, 10);
-      addTriad([[0.76, -0.44, -0.10], [1.28, 0.10, 0.02], [1.94, 0.42, 0.08], [2.42, 0.52, 0.08]], 0.082, 0.022, 0.028, 0.010, 0.033, 0.012, 14);
-      addTriad([[1.28, 0.10, 0.02], [1.44, 0.44, -0.04], [1.58, 0.78, -0.08]], 0.048, 0.018, 0.018, 0.008, 0.022, 0.010, 10);
-      addTriad([[1.28, 0.10, 0.02], [1.52, 0.18, 0.22], [1.74, 0.28, 0.34]], 0.046, 0.018, 0.018, 0.008, 0.021, 0.010, 10);
-      addTriad([[0.76, -0.44, -0.10], [0.58, 0.16, 0.30], [0.64, 0.72, 0.32]], 0.058, 0.020, 0.022, 0.009, 0.025, 0.011, 12);
-      addTriad([[0.58, 0.16, 0.30], [0.36, 0.14, 0.46], [0.16, 0.08, 0.54]], 0.040, 0.016, 0.016, 0.008, 0.019, 0.009, 10);
-      // ヒト肝静脈（右・中・左＋区域間分枝）
-      addHV([[-0.60, 1.38, -0.92], [-1.25, 1.08, -0.54], [-1.76, 0.56, -0.12], [-2.12, -0.10, 0.04]], 0.125, 0.028, 14);
-      addHV([[-1.25, 1.08, -0.54], [-1.52, 0.46, -0.54], [-1.62, -0.18, -0.52]], 0.072, 0.024, 10);
-      addHV([[-1.76, 0.56, -0.12], [-1.72, 0.30, 0.22], [-1.58, 0.06, 0.46]], 0.058, 0.020, 10);
-      addHV([[-0.60, 1.40, -0.92], [-0.25, 1.02, -0.28], [-0.08, 0.48, 0.26], [-0.14, -0.12, 0.52]], 0.105, 0.026, 14);
-      addHV([[-0.25, 1.02, -0.28], [-0.52, 0.92, 0.06], [-0.78, 0.80, 0.34]], 0.058, 0.020, 10);
-      addHV([[-0.08, 0.48, 0.26], [0.18, 0.52, 0.38], [0.42, 0.54, 0.42]], 0.054, 0.020, 10);
-      addHV([[-0.60, 1.42, -0.92], [0.22, 1.18, -0.50], [0.95, 0.80, -0.12], [1.86, 0.56, 0.04]], 0.118, 0.026, 14);
-      addHV([[0.95, 0.80, -0.12], [1.08, 0.62, 0.14], [1.18, 0.44, 0.34]], 0.056, 0.020, 10);
+    const bk1 = BK(), cap1 = CAP();
+    if (!cap1 && bk1 && vesselDefs.every((d) => bk1.has(d.key))) {
+      for (const d of vesselDefs) {
+        const m = new THREE.Mesh(bk1.get(d.key), mat(d.kind, d.extra));
+        m.castShadow = d.cast; m.receiveShadow = d.recv;
+        B.add(m, d.sid);
+      }
     } else {
-      // マウス肝内グリソン鞘（右側葉・右下葉・内側葉左右・外側左葉・尾状葉＋自然な曲線3次枝）
-      addTriad([[-0.72, -0.46, -0.12], [-1.32, -0.16, -0.05], [-1.76, 0.38, -0.12]], 0.078, 0.024, 0.026, 0.010, 0.032, 0.012, 12);
-      addTriad([[-1.32, -0.16, -0.05], [-1.56, -0.34, 0.03], [-1.80, -0.48, 0.10]], 0.048, 0.018, 0.019, 0.008, 0.022, 0.010, 10);
-      addTriad([[-0.72, -0.46, -0.12], [-1.14, -0.74, -0.50], [-1.56, -0.82, -0.52]], 0.060, 0.020, 0.022, 0.009, 0.025, 0.010, 10);
-      addTriad([[-0.72, -0.46, -0.12], [-0.74, 0.14, 0.70], [-0.96, 0.72, 0.74]], 0.064, 0.022, 0.023, 0.009, 0.026, 0.011, 12);
-      addTriad([[-0.74, 0.14, 0.70], [-0.62, 0.46, 0.76], [-0.52, 0.76, 0.78]], 0.042, 0.018, 0.017, 0.008, 0.020, 0.009, 10);
-      addTriad([[0.76, -0.44, -0.10], [0.12, 0.22, 0.76], [0.24, 0.76, 0.78]], 0.058, 0.020, 0.021, 0.009, 0.024, 0.010, 12);
-      addTriad([[0.12, 0.22, 0.76], [-0.02, 0.52, 0.80], [-0.14, 0.76, 0.80]], 0.038, 0.016, 0.016, 0.008, 0.018, 0.009, 10);
-      addTriad([[0.76, -0.44, -0.10], [1.16, -0.06, 0.20], [1.62, 0.16, 0.14], [1.96, 0.28, 0.06]], 0.082, 0.024, 0.028, 0.010, 0.032, 0.012, 14);
-      addTriad([[1.16, -0.06, 0.20], [1.26, 0.28, 0.22], [1.34, 0.58, 0.22]], 0.050, 0.018, 0.019, 0.008, 0.023, 0.010, 10);
-      addTriad([[1.16, -0.06, 0.20], [1.44, -0.28, 0.22], [1.74, -0.48, 0.18]], 0.050, 0.018, 0.019, 0.008, 0.023, 0.010, 10);
-      addTriad([[0.02, -0.74, -0.12], [0.20, -0.73, -0.30], [0.38, -0.72, -0.44]], 0.044, 0.018, 0.016, 0.008, 0.019, 0.009, 10);
-      // マウス肝静脈（各葉から下大静脈 IVC へ還流）
-      addHV([[-0.60, 1.38, -0.92], [-1.22, 0.72, -0.32], [-1.58, 0.14, -0.08], [-1.70, -0.34, 0.02]], 0.120, 0.028, 14);
-      addHV([[-1.22, 0.72, -0.32], [-1.20, 0.12, -0.42], [-1.18, -0.44, -0.50]], 0.065, 0.022, 10);
-      addHV([[-0.60, 1.40, -0.92], [-0.36, 0.92, 0.12], [-0.54, 0.72, 0.52], [-0.66, 0.48, 0.74]], 0.098, 0.026, 12);
-      addHV([[-0.36, 0.92, 0.12], [-0.14, 0.76, 0.54], [0.06, 0.56, 0.80]], 0.068, 0.022, 10);
-      addHV([[-0.60, 1.42, -0.92], [0.22, 0.95, -0.32], [0.95, 0.44, 0.16], [1.78, -0.04, 0.10]], 0.115, 0.028, 14);
-      addHV([[0.95, 0.44, 0.16], [1.02, 0.04, 0.24], [1.08, -0.42, 0.26]], 0.062, 0.022, 10);
+      const buckets = Object.fromEntries(vesselDefs.map((d) => [d.key, []]));
+      const pushB = (key, mesh, colorHex) => buckets[key].push({ mesh, colorHex });
+      const mBileHD = matSolid("gloss", bdCol, bileMatX);
+      const mBileCBD = matSolid("gloss", bdCol, bileMatX);
+      const mPV = matSolid("wet", pvCol);
+      const mHA = matSolid("wet", haCol);
+      const mHV = matSolid("wet", ivcCol);
+      const addBileBranch = (pts, ra, rb, sid, segs, intra) => {
+        const m = makeTaperTube(pts, ra, rb, segs || 14, intra ? 8 : 10, bdCol, "gloss", bileMatX, sid === "cbd" ? mBileCBD : mBileHD, intra);
+        const k = sid === "cbd" ? `l1_v_cbd_${pt}` : (intra ? `l1_v_hd_int_${sp}_${pt}` : `l1_v_hd_ext_${sp}_${pt}`);
+        pushB(k, m, bdCol);
+      };
+      // 左右肝管＋肝内への枝分かれ（門脈・肝動脈と並走するグリソン鞘系統）
+      addBileBranch([hilumR, chd0, jn], up, up, "hepatic_ducts");
+      addBileBranch([hilumL, chd0], up * 0.92, up, "hepatic_ducts");
+      addBileBranch(cyst, up * 0.78, up * 0.85, "hepatic_ducts");
+      // 総胆管（BDLでは結紮部上流が拡張・下流は細い、胆石では結石上流が拡張）
+      const cbdSegs = [
+        { pts: [jn, lig], ra: up, rb: up },
+        { pts: [lig, [-0.08, -1.86, 0.33], [-0.14, -2.34, 0.30]], ra: bdl ? r0 : up, rb: bdl ? r0 : gs ? up * 0.95 : r0 },
+        { pts: [[-0.14, -2.34, 0.30], papilla], ra: r0, rb: r0 * 0.92 }
+      ];
+      cbdSegs.forEach((sg) => addBileBranch(sg.pts, sg.ra, sg.rb, "cbd"));
+
+      // 門脈（後ろ側 z<0・肝門部で左右枝＋さらに区域枝へ分枝）
+      const pv = [[0.40, -3.55, -0.22], [0.35, -2.80, -0.28], [0.16, -2.00, -0.24], [0.06, -1.20, -0.18], [0.02, -0.74, -0.12]];
+      const smv = [[1.25, -3.85, 0.0], [0.62, -3.70, -0.15], [0.40, -3.55, -0.22]];
+      const spl = [[0.35, -2.80, -0.28], [1.02, -2.68, -0.46], [1.78, -2.52, -0.56]];
+      const imv = [[1.02, -2.68, -0.46], [1.10, -3.15, -0.44], [1.16, -3.52, -0.40]];
+      const capEnd = (pos, r, mMat, key, colHex) => { const m = new THREE.Mesh(geoSphere(r, 10), mMat); m.position.set(pos[0], pos[1], pos[2]); pushB(key, m, colHex); };
+      pushB("l1_v_pv_ext", makeTaperTube(pv, 0.145, 0.135, 20, 12, pvCol, "wet", null, mPV), pvCol);
+      pushB("l1_v_pv_ext", makeTaperTube(smv, 0.095, 0.12, 12, 10, pvCol, "wet", null, mPV), pvCol);
+      pushB("l1_v_pv_ext", makeTaperTube(spl, 0.11, 0.085, 12, 10, pvCol, "wet", null, mPV), pvCol);
+      pushB("l1_v_pv_ext", makeTaperTube(imv, 0.068, 0.048, 10, 10, pvCol, "wet", null, mPV), pvCol);
+      capEnd(spl[2], 0.084, mPV, "l1_v_pv_ext", pvCol); capEnd(imv[2], 0.047, mPV, "l1_v_pv_ext", pvCol);
+
+      // 固有肝動脈（解剖通り画面右・左寄り：左右肝動脈＋胆嚢動脈枝＋胃十二指腸動脈枝）
+      const ha = [[1.62, -2.25, -0.04], [0.92, -1.98, 0.06], [0.38, -1.58, 0.16], [0.22, -1.14, 0.22], [0.14, -0.74, 0.18]];
+      const kHaExt = `l1_v_ha_ext_${sp}`;
+      pushB(kHaExt, makeTaperTube(ha, 0.056, 0.046, 18, 10, haCol, "wet", null, mHA), haCol);
+      capEnd(ha[0], 0.055, mHA, kHaExt, haCol);
+      pushB(kHaExt, makeTaperTube([[0.38, -1.58, 0.16], [0.24, -1.92, 0.26], [0.16, -2.28, 0.24]], 0.042, 0.028, 10, 8, haCol, "wet", null, mHA), haCol);
+      // 胆嚢動脈（右肝動脈→胆嚢頸部）
+      pushB(kHaExt, makeTaperTube([[-0.22, -0.64, 0.18], [-0.28, -0.78, 0.36], [neck[0] + 0.04, neck[1] - 0.05, neck[2] + 0.06]], 0.024, 0.016, 8, 8, haCol, "wet", null, mHA), haCol);
+
+      // 肝内の門脈域分枝（門脈・肝動脈・胆管が並走：透過モードで立体的に見える。肝内なので影投影はオフ）
+      const bileDil = 1 + (up / r0 - 1) * 0.68;
+      const shiftPts = (pts, dx, dy, dz) => pts.map((p) => [p[0] + dx, p[1] + dy, p[2] + dz]);
+      const capTip = (ptPos, r, mMat, key, colHex) => { const m = new THREE.Mesh(geoSphere(r, 8), mMat); m.position.set(ptPos[0], ptPos[1], ptPos[2]); pushB(key, m, colHex); };
+      const kPvInt = `l1_v_pv_int_${sp}`, kHaInt = `l1_v_ha_int_${sp}`, kHdInt = `l1_v_hd_int_${sp}_${pt}`, kHvInt = `l1_v_hv_int_${sp}`;
+      const addTriad = (pts, pvA, pvB, haA, haB, bdA, bdB, segs) => {
+        const nSeg = Math.max(8, Math.round((segs || 12) * 0.8));
+        const haPts = shiftPts(pts, 0.040, -0.022, 0.054);
+        const bdPts = shiftPts(pts, -0.030, 0.034, 0.064);
+        pushB(kPvInt, makeTaperTube(pts, pvA, pvB, nSeg, 8, pvCol, "wet", null, mPV, true), pvCol);
+        pushB(kHaInt, makeTaperTube(haPts, haA, haB, nSeg, 7, haCol, "wet", null, mHA, true), haCol);
+        addBileBranch(bdPts, bdA * bileDil, bdB * bileDil, "hepatic_ducts", nSeg, true);
+        const end = pts.length - 1;
+        capTip(pts[end], pvB * 0.96, mPV, kPvInt, pvCol);
+        capTip(haPts[end], haB * 0.96, mHA, kHaInt, haCol);
+        capTip(bdPts[end], bdB * bileDil * 0.96, mBileHD, kHdInt, bdCol);
+      };
+      // 肝門部から左右の1次枝へ滑らかに接続
+      pushB(kPvInt, makeTaperTube([[0.02, -0.74, -0.12], [-0.36, -0.58, -0.12], [-0.72, -0.46, -0.12]], 0.118, 0.095, 10, 10, pvCol, "wet", null, mPV, true), pvCol);
+      pushB(kPvInt, makeTaperTube([[0.02, -0.74, -0.12], [0.38, -0.58, -0.11], [0.76, -0.44, -0.10]], 0.110, 0.088, 10, 10, pvCol, "wet", null, mPV, true), pvCol);
+      pushB(kHaInt, makeTaperTube([[0.14, -0.74, 0.18], [-0.38, -0.56, 0.14], [-0.68, -0.48, -0.06]], 0.042, 0.032, 10, 8, haCol, "wet", null, mHA, true), haCol);
+      pushB(kHaInt, makeTaperTube([[0.14, -0.74, 0.18], [0.50, -0.54, 0.12], [0.80, -0.46, -0.04]], 0.040, 0.030, 10, 8, haCol, "wet", null, mHA, true), haCol);
+      addBileBranch([hilumR, [-0.64, -0.50, 0.06], [-0.75, -0.42, -0.05]], up * 0.78, up * 0.62, "hepatic_ducts", 10, true);
+      addBileBranch([hilumL, [0.56, -0.48, 0.08], [0.73, -0.40, -0.03]], up * 0.72, up * 0.58, "hepatic_ducts", 10, true);
+
+      // 肝静脈（別系統：小葉間・区域間を走り下大静脈 IVC へ注ぐ）
+      const ivcMesh = new THREE.Mesh(hollowCylGeo(0.25, 0.18, 5.42, 20, ivcCol, 0x1e3c72), mat("wet"));
+      ivcMesh.position.set(-0.60, -0.73, -0.94); ivcMesh.castShadow = true; ivcMesh.receiveShadow = true;
+      pushB("l1_v_hv_ext", ivcMesh);
+      const addHV = (pts, ra, rb, segs) => {
+        pushB(kHvInt, makeTaperTube(pts, ra, rb, Math.max(8, Math.round((segs || 12) * 0.8)), 8, ivcCol, "wet", null, mHV, true), ivcCol);
+        capTip(pts[pts.length - 1], rb * 0.96, mHV, kHvInt, ivcCol);
+      };
+
+      if (human) {
+        // ヒト肝内グリソン鞘（右前S8/S5・右後S7/S6・左外側S2/S3・左内側S4＋自然な曲線3次枝）
+        addTriad([[-0.72, -0.46, -0.12], [-1.14, 0.02, 0.18], [-1.36, 0.62, 0.34], [-1.22, 0.96, 0.24]], 0.088, 0.024, 0.030, 0.011, 0.036, 0.013, 14);
+        addTriad([[-1.14, 0.02, 0.18], [-0.94, 0.36, 0.36], [-0.82, 0.74, 0.42]], 0.052, 0.020, 0.020, 0.009, 0.024, 0.011, 10);
+        addTriad([[-1.14, 0.02, 0.18], [-1.52, -0.26, 0.34], [-1.86, -0.52, 0.20]], 0.056, 0.020, 0.021, 0.009, 0.025, 0.011, 10);
+        addTriad([[-0.72, -0.46, -0.12], [-1.34, -0.08, -0.22], [-1.96, 0.24, -0.22], [-2.22, 0.48, -0.14]], 0.084, 0.024, 0.028, 0.010, 0.034, 0.012, 14);
+        addTriad([[-1.34, -0.08, -0.22], [-1.54, 0.38, -0.22], [-1.68, 0.84, -0.14]], 0.050, 0.020, 0.019, 0.009, 0.023, 0.010, 10);
+        addTriad([[-1.34, -0.08, -0.22], [-1.62, -0.32, -0.28], [-1.88, -0.56, -0.30]], 0.052, 0.020, 0.020, 0.009, 0.024, 0.010, 10);
+        addTriad([[0.76, -0.44, -0.10], [1.28, 0.10, 0.02], [1.94, 0.42, 0.08], [2.42, 0.52, 0.08]], 0.082, 0.022, 0.028, 0.010, 0.033, 0.012, 14);
+        addTriad([[1.28, 0.10, 0.02], [1.44, 0.44, -0.04], [1.58, 0.78, -0.08]], 0.048, 0.018, 0.018, 0.008, 0.022, 0.010, 10);
+        addTriad([[1.28, 0.10, 0.02], [1.52, 0.18, 0.22], [1.74, 0.28, 0.34]], 0.046, 0.018, 0.018, 0.008, 0.021, 0.010, 10);
+        addTriad([[0.76, -0.44, -0.10], [0.58, 0.16, 0.30], [0.64, 0.72, 0.32]], 0.058, 0.020, 0.022, 0.009, 0.025, 0.011, 12);
+        addTriad([[0.58, 0.16, 0.30], [0.36, 0.14, 0.46], [0.16, 0.08, 0.54]], 0.040, 0.016, 0.016, 0.008, 0.019, 0.009, 10);
+        // ヒト肝静脈（右・中・左＋区域間分枝）
+        addHV([[-0.60, 1.38, -0.92], [-1.25, 1.08, -0.54], [-1.76, 0.56, -0.12], [-2.12, -0.10, 0.04]], 0.125, 0.028, 14);
+        addHV([[-1.25, 1.08, -0.54], [-1.52, 0.46, -0.54], [-1.62, -0.18, -0.52]], 0.072, 0.024, 10);
+        addHV([[-1.76, 0.56, -0.12], [-1.72, 0.30, 0.22], [-1.58, 0.06, 0.46]], 0.058, 0.020, 10);
+        addHV([[-0.60, 1.40, -0.92], [-0.25, 1.02, -0.28], [-0.08, 0.48, 0.26], [-0.14, -0.12, 0.52]], 0.105, 0.026, 14);
+        addHV([[-0.25, 1.02, -0.28], [-0.52, 0.92, 0.06], [-0.78, 0.80, 0.34]], 0.058, 0.020, 10);
+        addHV([[-0.08, 0.48, 0.26], [0.18, 0.52, 0.38], [0.42, 0.54, 0.42]], 0.054, 0.020, 10);
+        addHV([[-0.60, 1.42, -0.92], [0.22, 1.18, -0.50], [0.95, 0.80, -0.12], [1.86, 0.56, 0.04]], 0.118, 0.026, 14);
+        addHV([[0.95, 0.80, -0.12], [1.08, 0.62, 0.14], [1.18, 0.44, 0.34]], 0.056, 0.020, 10);
+      } else {
+        // マウス肝内グリソン鞘（右側葉・右下葉・内側葉左右・外側左葉・尾状葉＋自然な曲線3次枝）
+        addTriad([[-0.72, -0.46, -0.12], [-1.32, -0.16, -0.05], [-1.76, 0.38, -0.12]], 0.078, 0.024, 0.026, 0.010, 0.032, 0.012, 12);
+        addTriad([[-1.32, -0.16, -0.05], [-1.56, -0.34, 0.03], [-1.80, -0.48, 0.10]], 0.048, 0.018, 0.019, 0.008, 0.022, 0.010, 10);
+        addTriad([[-0.72, -0.46, -0.12], [-1.14, -0.74, -0.50], [-1.56, -0.82, -0.52]], 0.060, 0.020, 0.022, 0.009, 0.025, 0.010, 10);
+        addTriad([[-0.72, -0.46, -0.12], [-0.74, 0.14, 0.70], [-0.96, 0.72, 0.74]], 0.064, 0.022, 0.023, 0.009, 0.026, 0.011, 12);
+        addTriad([[-0.74, 0.14, 0.70], [-0.62, 0.46, 0.76], [-0.52, 0.76, 0.78]], 0.042, 0.018, 0.017, 0.008, 0.020, 0.009, 10);
+        addTriad([[0.76, -0.44, -0.10], [0.12, 0.22, 0.76], [0.24, 0.76, 0.78]], 0.058, 0.020, 0.021, 0.009, 0.024, 0.010, 12);
+        addTriad([[0.12, 0.22, 0.76], [-0.02, 0.52, 0.80], [-0.14, 0.76, 0.80]], 0.038, 0.016, 0.016, 0.008, 0.018, 0.009, 10);
+        addTriad([[0.76, -0.44, -0.10], [1.16, -0.06, 0.20], [1.62, 0.16, 0.14], [1.96, 0.28, 0.06]], 0.082, 0.024, 0.028, 0.010, 0.032, 0.012, 14);
+        addTriad([[1.16, -0.06, 0.20], [1.26, 0.28, 0.22], [1.34, 0.58, 0.22]], 0.050, 0.018, 0.019, 0.008, 0.023, 0.010, 10);
+        addTriad([[1.16, -0.06, 0.20], [1.44, -0.28, 0.22], [1.74, -0.48, 0.18]], 0.050, 0.018, 0.019, 0.008, 0.023, 0.010, 10);
+        addTriad([[0.02, -0.74, -0.12], [0.20, -0.73, -0.30], [0.38, -0.72, -0.44]], 0.044, 0.018, 0.016, 0.008, 0.019, 0.009, 10);
+        // マウス肝静脈（各葉から下大静脈 IVC へ還流）
+        addHV([[-0.60, 1.38, -0.92], [-1.22, 0.72, -0.32], [-1.58, 0.14, -0.08], [-1.70, -0.34, 0.02]], 0.120, 0.028, 14);
+        addHV([[-1.22, 0.72, -0.32], [-1.20, 0.12, -0.42], [-1.18, -0.44, -0.50]], 0.065, 0.022, 10);
+        addHV([[-0.60, 1.40, -0.92], [-0.36, 0.92, 0.12], [-0.54, 0.72, 0.52], [-0.66, 0.48, 0.74]], 0.098, 0.026, 12);
+        addHV([[-0.36, 0.92, 0.12], [-0.14, 0.76, 0.54], [0.06, 0.56, 0.80]], 0.068, 0.022, 10);
+        addHV([[-0.60, 1.42, -0.92], [0.22, 0.95, -0.32], [0.95, 0.44, 0.16], [1.78, -0.04, 0.10]], 0.115, 0.028, 14);
+        addHV([[0.95, 0.44, 0.16], [1.02, 0.04, 0.24], [1.08, -0.42, 0.26]], 0.062, 0.022, 10);
+      }
+
+      for (const d of vesselDefs) {
+        const merged = mergeMeshesWithColor(buckets[d.key]);
+        if (cap1) cap1.onGeo(d.key, merged);
+        const m = new THREE.Mesh(merged, mat(d.kind, d.extra));
+        m.castShadow = d.cast; m.receiveShadow = d.recv;
+        B.add(m, d.sid);
+      }
     }
 
     // 十二指腸・Oddi・回腸（シームレスな1本管で自然な粘膜ひだ）
     const giPts = [[1.02, -1.85, 0.20], [0.20, -1.98, 0.30], [-0.46, -2.16, 0.32], [-0.66, -2.70, 0.32], [-0.38, -3.20, 0.30], [0.40, -3.32, 0.25], [1.20, -3.15, 0.20], [1.76, -3.30, 0.18], [2.15, -3.60, 0.10], [1.85, -3.92, 0.05], [1.25, -3.85, 0.0]];
     const giRadii = [0.23, 0.23, 0.23, 0.23, 0.23, 0.225, 0.21, 0.20, 0.195, 0.195, 0.195];
     B.part({
+      bakeKey: `l1_duo_${pt}`,
       sid: "duodenum_ileum", f: S.tube(giPts, giRadii, 0.16), ...bbPts(giPts, 0.36), res: 64, skipInterior: true, mat: "wet",
       color: (x, y, z) => { const r = 0.5 + 0.5 * Math.sin((x * 0.7 + y) * 26); return S.mix(H(0xd27065), H(0xec9e8e), r * 0.52 + S.fbm(x * 3, y * 3, z * 3) * 0.3); }
     });
-    B.part({ sid: "oddi_sphincter", f: S.torus([papilla[0] - 0.02, papilla[1], papilla[2]], 0.078, 0.042, "x"), bmin: [-0.54, -2.76, 0.16], bmax: [-0.24, -2.44, 0.48], res: 34, mat: "clay", color: H(0xbf5147) });
+    B.part({ bakeKey: `l1_oddi_${gs ? "gs" : "norm"}`, sid: "oddi_sphincter", f: S.torus([papilla[0] - 0.02, papilla[1], papilla[2]], 0.078, 0.042, "x"), bmin: [-0.54, -2.76, 0.16], bmax: [-0.24, -2.44, 0.48], res: 34, mat: "clay", color: H(0xbf5147) });
 
     // 病態：結紮・結石
     if (bdl) {
-      B.part({ sid: "bdl_ligature", f: S.union([S.torus(lig, 0.095, 0.034, "y"), S.sphere([lig[0] + 0.105, lig[1], lig[2] + 0.06], 0.048)], 0.02), bmin: [lig[0] - 0.22, lig[1] - 0.11, lig[2] - 0.22], bmax: [lig[0] + 0.24, lig[1] + 0.11, lig[2] + 0.22], res: 38, mat: "gloss", color: H(0xec7e1a) });
+      B.part({ bakeKey: "l1_bdl_lig", sid: "bdl_ligature", f: S.union([S.torus(lig, 0.095, 0.034, "y"), S.sphere([lig[0] + 0.105, lig[1], lig[2] + 0.06], 0.048)], 0.02), bmin: [lig[0] - 0.22, lig[1] - 0.11, lig[2] - 0.22], bmax: [lig[0] + 0.24, lig[1] + 0.11, lig[2] + 0.22], res: 38, mat: "gloss", color: H(0xec7e1a) });
     }
     if (gs) {
       const sc = [-0.14, -2.33, 0.30];
-      B.part({ sid: "gallstone_cbd", f: S.displace(S.sphere(sc, 0.105), 0.04, 9), bmin: [sc[0] - 0.17, sc[1] - 0.17, sc[2] - 0.17], bmax: [sc[0] + 0.17, sc[1] + 0.17, sc[2] + 0.17], res: 34, mat: "clay", color: (x, y, z) => S.mix(H(0xd29c3a), H(0x6e4b1c), S.noise(x * 20, y * 20, z * 20)) });
+      B.part({ bakeKey: "l1_stcbd", sid: "gallstone_cbd", f: S.displace(S.sphere(sc, 0.105), 0.04, 9), bmin: [sc[0] - 0.17, sc[1] - 0.17, sc[2] - 0.17], bmax: [sc[0] + 0.17, sc[1] + 0.17, sc[2] + 0.17], res: 34, mat: "clay", color: (x, y, z) => S.mix(H(0xd29c3a), H(0x6e4b1c), S.noise(x * 20, y * 20, z * 20)) });
     }
     B.build();
 
@@ -640,7 +778,7 @@
     const blockS = bdl ? ehc.c[3] : gs ? ehc.c[5] - 0.08 : Infinity;
     const N = 52;
     B.flow({
-      geom: geoSphere(0.046, 12), mat: matSolid("gloss", 0xf5b800, { emissive: 0x6b3e00, emissiveIntensity: 0.45 }), n: N,
+      geom: geoSphere(0.046, 12), mat: new THREE.MeshPhongMaterial({ color: linCol(0xf5b800), emissive: linCol(0x6b3e00), emissiveIntensity: 0.45, shininess: 95 }), n: N,
       spawn: (p, i, init) => {
         p.path = ehc; p.v = 0.55;
         p.s = init ? (i / N) * ehc.len : 0;
@@ -698,6 +836,7 @@
       return S.smax(d, -hole, 0.03);
     };
     B.part({
+      bakeKey: `l2_tissue_${sp}_${pt}`,
       sid: "lobule_array", f: tissue, bmin: [-3.0, -0.65, -2.35], bmax: [3.0, 0.65, 2.35], res: 112, skipInterior: true, mat: "wet",
       color: (x, y, z) => {
         const c = nearest(x, z);
@@ -878,6 +1017,7 @@
     // 鮮やかなゾーン1/2/3の帯（上面でも切り欠き断面でも一目瞭然に）
     const z3 = H(0x5274cc), z2 = H(0xe3a53a), z1 = H(0xd86246);
     B.part({
+      bakeKey: `l3_zone_${pt}`,
       sid: "zone1", zone: true, f: tissue, bmin: [-2.42, -1.08, -2.08], bmax: [2.42, 1.08, 2.08], res: 116, mat: "wet",
       color: (x, y, z) => {
         const rho = rhoOf(x, z);
@@ -892,6 +1032,7 @@
     });
     // 中心静脈（1/4切り欠きで内腔を見せる・共通青）
     B.part({
+      bakeKey: "l3_cv",
       sid: "central_vein",
       f: (x, y, z) => { const r = Math.hypot(x, z); return Math.max(Math.max(r - 0.46, 0.35 - r), Math.abs(y) - (hh + 0.05), cut(x, y, z)); },
       bmin: [-0.55, -1.12, -0.55], bmax: [0.55, 1.12, 0.55], res: 54, mat: "gloss",
@@ -1096,26 +1237,28 @@
 
     // 単一の高精細肝細胞シェルを1回だけSDF生成し、10細胞に配置（高速＆高精細！）
     if (!GEO.hepCell) {
-      const box = S.roundBox([0, 0, 0], [HX, HY, HZ], 0.22);
-      const scoop = S.roundBox([0, 0, 0], [HX - 0.10, HY - 0.10, 0.26], 0.16);
-      const oneF = (x, y, z) => {
-        let d = box(x, y, z - CZ);
-        d = Math.max(d, -scoop(x, y, z - CUT));
-        // 類洞側(-y面)の微絨毛
-        const fy = -y - (HY - 0.04);
-        if (fy > -0.06 && fy < 0.06 && z < CUT - 0.04) d -= 0.032 * Math.max(0, Math.sin(x * 46) * Math.sin(z * 46));
-        return Math.max(d, z - CUT);
-      };
-      GEO.hepCell = shared(S.mesh(oneF, [-HX - 0.08, -HY - 0.08, CZ - HZ - 0.06], [HX + 0.08, HY + 0.08, CUT + 0.06], 62, {
-        color: (x, y, z) => {
-          const rim = z > CUT - 0.055;
-          const cavity = z > 0.05 && Math.abs(x) < HX - 0.08 && Math.abs(y) < HY - 0.08;
-          const base = rim ? H(0xde876c) : cavity ? H(0xf5c8b0) : H(0xd97d63);
-          const n = 0.92 + 0.12 * S.noise(x * 13, y * 13, z * 13);
-          return [base[0] * n, base[1] * n, base[2] * n];
-        },
-        aoDist: 0.24, aoMin: 0.36
-      }));
+      GEO.hepCell = bakedGeo("sh_hepCell", () => {
+        const box = S.roundBox([0, 0, 0], [HX, HY, HZ], 0.22);
+        const scoop = S.roundBox([0, 0, 0], [HX - 0.10, HY - 0.10, 0.26], 0.16);
+        const oneF = (x, y, z) => {
+          let d = box(x, y, z - CZ);
+          d = Math.max(d, -scoop(x, y, z - CUT));
+          // 類洞側(-y面)の微絨毛
+          const fy = -y - (HY - 0.04);
+          if (fy > -0.06 && fy < 0.06 && z < CUT - 0.04) d -= 0.032 * Math.max(0, Math.sin(x * 46) * Math.sin(z * 46));
+          return Math.max(d, z - CUT);
+        };
+        return S.mesh(oneF, [-HX - 0.08, -HY - 0.08, CZ - HZ - 0.06], [HX + 0.08, HY + 0.08, CUT + 0.06], 62, {
+          color: (x, y, z) => {
+            const rim = z > CUT - 0.055;
+            const cavity = z > 0.05 && Math.abs(x) < HX - 0.08 && Math.abs(y) < HY - 0.08;
+            const base = rim ? H(0xde876c) : cavity ? H(0xf5c8b0) : H(0xd97d63);
+            const n = 0.92 + 0.12 * S.noise(x * 13, y * 13, z * 13);
+            return [base[0] * n, base[1] * n, base[2] * n];
+          },
+          aoDist: 0.24, aoMin: 0.36
+        });
+      });
     }
     const dm = new THREE.Object3D();
     const hepIM = new THREE.InstancedMesh(GEO.hepCell, mat("wet"), 10);
@@ -1206,7 +1349,9 @@
       d = Math.max(d, -fen(x, y, z));
       return Math.max(d, z - CUT);
     };
+    const l4Tag = bdl ? "bdl" : "norm";
     B.part({
+      bakeKey: `l4_lsec_${sp}_${l4Tag}`,
       sid: "lsec", f: lsecF, bmin: [-3.42, -0.76, -1.36], bmax: [3.12, 0.76, 0.40], res: 142, mat: "wet",
       color: (x, y, z) => S.mix(H(0xe07e92), H(0xf2adba), S.noise(x * 6, y * 6, z * 6))
     });
@@ -1227,7 +1372,7 @@
       S.capsule([0.1, hy, 0.18], [-0.3, -0.7, -0.6], 0.028, 0.014)
     ];
     if (bdl) proc.push(S.capsule([0.8, hy, 0.12], [-1.8, hy, -0.2], 0.044, 0.022), S.capsule([1.6, hy, -0.1], [2.9, hy, 0.2], 0.038, 0.016));
-    B.part({ sid: "hsc", f: (x, y, z) => Math.max(S.union([hscBody].concat(proc), 0.06)(x, y, z), z - CUT), bmin: [-2.0, -0.92, -1.15], bmax: [3.0, -0.66, 0.40], res: 98, skipInterior: true, mat: "wet", color: H(bdl ? 0x583c9e : 0x6f52bf) });
+    B.part({ bakeKey: `l4_hsc_${l4Tag}`, sid: "hsc", f: (x, y, z) => Math.max(S.union([hscBody].concat(proc), 0.06)(x, y, z), z - CUT), bmin: [-2.0, -0.92, -1.15], bmax: [3.0, -0.66, 0.40], res: 98, skipInterior: true, mat: "wet", color: H(bdl ? 0x583c9e : 0x6f52bf) });
     if (!bdl) {
       const drops = [[0.60, hy + 0.01, 0.26], [0.80, hy + 0.01, 0.30], [0.98, hy + 0.01, 0.22], [0.72, hy + 0.01, 0.06], [0.95, hy + 0.01, 0.02], [0.52, hy + 0.01, 0.02]];
       const vitIM = new THREE.InstancedMesh(geoSphere(0.062, 12), matSolid("gloss", 0xf7b914, { emissive: 0x523400, emissiveIntensity: 0.25 }), drops.length);
@@ -1261,7 +1406,7 @@
       d = S.smax(d, -Math.min(g1, gy), 0.01);
       return Math.max(d, z - DZ);
     };
-    B.part({ sid: "canal_of_hering", f: ductF, bmin: [DX - 0.52, -2.05, DZ - 0.52], bmax: [DX + 0.52, 2.05, DZ + 0.08], res: 92, mat: "wet", color: (x, y, z) => Math.hypot(x - DX, z - DZ) < rIn + 0.035 ? H(0x74d1a3) : H(0x2aa85e) });
+    B.part({ bakeKey: `l4_duct_${l4Tag}`, sid: "canal_of_hering", f: ductF, bmin: [DX - 0.52, -2.05, DZ - 0.52], bmax: [DX + 0.52, 2.05, DZ + 0.08], res: 92, mat: "wet", color: (x, y, z) => Math.hypot(x - DX, z - DZ) < rIn + 0.035 ? H(0x74d1a3) : H(0x2aa85e) });
     // 門脈域の門脈枝（紫）＋肝動脈枝（赤）から類洞右端へ直結する流入枝（結合組織内にすっきり収める）
     const pvBranch = new THREE.Mesh(hollowCylGeo(0.23, 0.14, 3.65, 16, 0x6f5ed8, 0x382a88), mat("gloss"));
     pvBranch.position.set(3.58, 0, -0.80); pvBranch.castShadow = true; pvBranch.receiveShadow = true;
@@ -1282,8 +1427,8 @@
     }
     const herP = [[3.30, 1.45, 0.28], [3.76, 1.32, 0.22], [DX - 0.14, 1.18, DZ + 0.02]];
     const herP2 = [[3.30, -1.45, 0.28], [3.76, -1.32, 0.22], [DX - 0.14, -1.16, DZ + 0.02]];
-    B.part({ sid: "canal_of_hering", f: S.tube(herP, 0.088, 0.05), ...bbPts(herP, 0.15), res: 46, skipInterior: true, mat: "gloss", color: (x) => S.mix(H(0xdf8c72), H(0x2aa85e), S.smooth(3.30, 3.88, x)) });
-    B.part({ sid: "canal_of_hering", f: S.tube(herP2, 0.084, 0.05), ...bbPts(herP2, 0.15), res: 46, skipInterior: true, mat: "gloss", color: (x) => S.mix(H(0xdf8c72), H(0x2aa85e), S.smooth(3.30, 3.88, x)) });
+    B.part({ bakeKey: `l4_her1_${l4Tag}`, sid: "canal_of_hering", f: S.tube(herP, 0.088, 0.05), ...bbPts(herP, 0.15), res: 46, skipInterior: true, mat: "gloss", color: (x) => S.mix(H(0xdf8c72), H(0x2aa85e), S.smooth(3.30, 3.88, x)) });
+    B.part({ bakeKey: `l4_her2_${l4Tag}`, sid: "canal_of_hering", f: S.tube(herP2, 0.084, 0.05), ...bbPts(herP2, 0.15), res: 46, skipInterior: true, mat: "gloss", color: (x) => S.mix(H(0xdf8c72), H(0x2aa85e), S.smooth(3.30, 3.88, x)) });
     const ptF = (x, y, z) => {
       let d = S.roundBox([4.38, 0, -0.5], [0.96, 2.08, 0.88], 0.28)(x, y, z);
       d = S.displace((a, b, c) => d, 0.038, 3)(x, y, z);
@@ -1294,11 +1439,12 @@
       d = Math.max(d, -S.tube(herP2, 0.13, 0.05)(x, y, z));
       return Math.max(d, z - CUT);
     };
-    B.part({ sid: "portal_triad", f: ptF, bmin: [3.34, -2.20, -1.50], bmax: [5.44, 2.20, 0.42], res: 88, skipInterior: true, mat: "soft", color: (x, y, z) => S.mix(H(bdl ? 0xd9bede : 0xe6d3be), H(0xd9c2aa), S.noise(x * 8, y * 8, z * 8)) });
+    B.part({ bakeKey: `l4_pt_${l4Tag}`, sid: "portal_triad", f: ptF, bmin: [3.34, -2.20, -1.50], bmax: [5.44, 2.20, 0.42], res: 88, skipInterior: true, mat: "soft", color: (x, y, z) => S.mix(H(bdl ? 0xd9bede : 0xe6d3be), H(0xd9c2aa), S.noise(x * 8, y * 8, z * 8)) });
 
     // IgA形質細胞（特徴的な偏在・車軸状核）＋門脈域リンパ球
     const pc = [4.94, -1.05, 0.24];
     B.part({
+      bakeKey: `l4_pc_${l4Tag}`,
       sid: "portal_iga_plasma", f: S.ellipsoid(pc, [0.28, 0.22, 0.20]),
       bmin: [pc[0] - 0.34, pc[1] - 0.28, pc[2] - 0.28], bmax: [pc[0] + 0.34, pc[1] + 0.28, pc[2] + 0.28], res: 36, skipInterior: true, mat: "wet",
       color: (x, y, z) => {
@@ -1336,7 +1482,7 @@
 
       const neu = [[-2.0, 0.1, -0.2], [0.3, -0.3, 0.0], [2.2, 0.25, -0.35], [3.7, -1.9, 0.3], [5.0, 0.05, 0.3], [4.4, 1.85, 0.3]];
       if (!GEO.neutro) {
-        GEO.neutro = shared(S.mesh(
+        GEO.neutro = bakedGeo("sh_neutro", () => S.mesh(
           S.displace(S.sphere([0, 0, 0], 0.145), 0.03, 12),
           [-0.20, -0.20, -0.20], [0.20, 0.20, 0.20], 26,
           {
@@ -1355,18 +1501,21 @@
 
     // クッパー細胞（鮮やかなオレンジ色の樹状マクロファージ・類洞内腔側）
     const kc = [-1.5, -0.42, -0.08];
-    const kF = S.displace(S.union([
-      S.ellipsoid(kc, [0.34, 0.21, 0.27]),
-      S.capsule(kc, [-2.05, -0.58, 0.14], 0.075, 0.026),
-      S.capsule(kc, [-1.02, -0.60, -0.36], 0.075, 0.026),
-      S.capsule(kc, [-1.62, -0.22, 0.30], 0.065, 0.022),
-      S.capsule(kc, [-0.96, -0.36, 0.20], 0.065, 0.022),
-      S.capsule(kc, [-1.88, -0.26, -0.44], 0.055, 0.022)
-    ], 0.1), 0.04, 5);
-    const kgeo = S.mesh(kF, [kc[0] - 0.68, kc[1] - 0.32, kc[2] - 0.62], [kc[0] + 0.68, kc[1] + 0.36, kc[2] + 0.62], 58, {
-      color: (x, y, z) => S.mix(H(0xe66516), H(0xf6963a), S.noise(x * 8, y * 8, z * 8)), aoDist: 0.15
-    });
-    kgeo.translate(-kc[0], -kc[1], -kc[2]);
+    const kgeo = GEO.kupffer || (GEO.kupffer = bakedGeo("sh_kupffer", () => {
+      const kF = S.displace(S.union([
+        S.ellipsoid(kc, [0.34, 0.21, 0.27]),
+        S.capsule(kc, [-2.05, -0.58, 0.14], 0.075, 0.026),
+        S.capsule(kc, [-1.02, -0.60, -0.36], 0.075, 0.026),
+        S.capsule(kc, [-1.62, -0.22, 0.30], 0.065, 0.022),
+        S.capsule(kc, [-0.96, -0.36, 0.20], 0.065, 0.022),
+        S.capsule(kc, [-1.88, -0.26, -0.44], 0.055, 0.022)
+      ], 0.1), 0.04, 5);
+      const g = S.mesh(kF, [kc[0] - 0.68, kc[1] - 0.32, kc[2] - 0.62], [kc[0] + 0.68, kc[1] + 0.36, kc[2] + 0.62], 58, {
+        color: (x, y, z) => S.mix(H(0xe66516), H(0xf6963a), S.noise(x * 8, y * 8, z * 8)), aoDist: 0.15
+      });
+      g.translate(-kc[0], -kc[1], -kc[2]);
+      return g;
+    }));
     const kup = new THREE.Mesh(kgeo, mat("wet")); kup.position.set(kc[0], kc[1], kc[2]); kup.castShadow = true;
     B.add(kup, "kupffer_cell");
     B.onUpdate((t) => { kup.rotation.y = Math.sin(t * 0.8) * 0.14; kup.scale.set(1 + Math.sin(t * 1.4) * 0.05, 1, 1 - Math.sin(t * 1.4) * 0.04); });
@@ -1583,6 +1732,7 @@
       return Math.max(d, z - CUT);
     };
     B.part({
+      bakeKey: `l5_cell_${pt}`,
       sid: "bile_acid_pool", zone: true, f: cellF, bmin: [-2.92, -2.30, -1.96], bmax: [3.02, 2.30, 0.68], res: 118, skipInterior: true, mat: "wet",
       color: (x, y, z) => {
         const dc = Math.hypot(x - CX, y) - CR;
@@ -1597,6 +1747,7 @@
     // 類洞内皮（窓あり・温かなローズピンク）
     const hr = human ? 0.044 : 0.060;
     B.part({
+      bakeKey: `l5_lsec_${sp}_${bdl ? "bdl" : "norm"}`,
       sid: null,
       f: (x, y, z) => {
         let d = S.roundBox([-3.06, 0, -0.6], [0.035, 2.28, 1.28], 0.02)(x, y, z);
@@ -1664,7 +1815,7 @@
 
     // 輸送体（立体感のある多サブユニット膜貫通タンパク質）
     if (!GEO.prot) {
-      GEO.prot = shared(S.mesh(
+      GEO.prot = bakedGeo("sh_prot", () => S.mesh(
         S.displace(S.union([
           S.ellipsoid([0, 0, 0], [0.28, 0.16, 0.16]),
           S.sphere([0.07, 0.09, 0.06], 0.10),
@@ -1691,7 +1842,8 @@
 
     // 胆汁酸分子（ステロイド骨格＋抱合アミノ酸：マウスはタウリン青、ヒトはグリシン緑）
     const tag = human ? H(0x2eb864) : H(0x2884e0);
-    const baG = S.mesh(S.union([S.ellipsoid([0, 0, 0], [0.10, 0.052, 0.048]), S.sphere([0.12, 0.02, 0], 0.038)], 0.02), [-0.14, -0.08, -0.08], [0.18, 0.08, 0.08], 28, { color: (x) => (x > 0.08 ? tag : H(0xf2b418)) });
+    const baKey = human ? "sh_ba_human" : "sh_ba_mouse";
+    const baG = GEO[baKey] || (GEO[baKey] = bakedGeo(baKey, () => S.mesh(S.union([S.ellipsoid([0, 0, 0], [0.10, 0.052, 0.048]), S.sphere([0.12, 0.02, 0], 0.038)], 0.02), [-0.14, -0.08, -0.08], [0.18, 0.08, 0.08], 28, { color: (x) => (x > 0.08 ? tag : H(0xf2b418)) })));
     const baMat = mat("gloss", { emissive: 0x3a2400, emissiveIntensity: 0.25 });
     const lumen = (z) => [CX + (S.rand() - 0.5) * CR * 0.6, (S.rand() - 0.5) * CR * 0.6, z];
     const exitZ = bdl ? null : -1.9;
