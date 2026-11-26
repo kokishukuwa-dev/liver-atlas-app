@@ -43,7 +43,7 @@
   const key = new THREE.DirectionalLight(0xfff4e4, 1.25);
   key.position.set(5, 9, 7);
   key.castShadow = true;
-  key.shadow.mapSize.set(2048, 2048);
+  key.shadow.mapSize.set(1024, 1024);
   Object.assign(key.shadow.camera, { left: -7, right: 7, top: 7, bottom: -7, near: 1, far: 30 });
   key.shadow.bias = -0.0005; key.shadow.normalBias = 0.025;
   scene.add(key); scene.add(key.target);
@@ -65,12 +65,22 @@
   blob.rotation.x = -Math.PI / 2; blob.scale.set(10, 6, 1); scene.add(blob);
 
   // ===== 状態 =====
-  const state = { species: "mouse", path: "normal", level: 0, labels: true, playing: true, xray: false, drawerOpen: false, sel: null, tab: "s" };
+  const state = { species: "mouse", path: "normal", level: 0, labels: true, playing: true, xray: false, drawerOpen: false, hudOpen: false, sel: null, tab: "s" };
   const XRAY_OPACITY = 0.25;
   const levels = [null, null, null, null, null];
+  const buildMs = [0, 0, 0, 0, 0];
   const keyOf = () => state.species + "/" + state.path;
   const cam = { yaw: 0, pitch: 0.2, dist: 10, target: new THREE.Vector3(), tYaw: 0, tPitch: 0.2, tDist: 10, tTarget: new THREE.Vector3(), lastInput: -10 };
   let trans = null, time = 0, lastDistScale = 1;
+
+  // ズーム遷移時に拡大先を光らせるリング
+  const focusRing = new THREE.Mesh(
+    new THREE.RingGeometry(0.32, 0.44, 36),
+    new THREE.MeshBasicMaterial({ color: 0xffb830, transparent: true, opacity: 0, side: THREE.DoubleSide, depthTest: false })
+  );
+  focusRing.renderOrder = 20;
+  focusRing.visible = false;
+  scene.add(focusRing);
 
   function distScale() {
     const w = canvas.clientWidth, h = canvas.clientHeight;
@@ -90,7 +100,11 @@
     let L = levels[i];
     if (L && L.key === keyOf()) return L;
     if (L) disposeLevel(L);
+    const t0 = performance.now();
     L = A.buildLevel(i, state.species, state.path);
+    const ms = Math.round(performance.now() - t0);
+    buildMs[i] = ms;
+    console.info(`[LiverAtlas] L${i + 1} (${state.species}/${state.path}) built in ${ms} ms`);
     L.key = keyOf();
     L.group.visible = false;
     L.group.traverse((o) => {
@@ -167,9 +181,17 @@
       applyXray(to);
       setOpacity(to, 0);
       trans = { from, to, dir, t: 0 };
-      buildLabels(); renderPanel(); syncNav();
+      if (dir > 0 && from && from.zoomSpot) {
+        const sp = from.zoomSpot;
+        focusRing.position.set(sp[0], sp[1], sp[2]);
+        focusRing.visible = true;
+      } else {
+        focusRing.visible = false;
+      }
+      buildLabels(); renderPanel(); renderFlowHud(); syncNav();
+      if (!document.getElementById("th" + i).classList.contains("ready")) thumb(i);
     };
-    if (needBuild) { showLoader(true); setTimeout(() => { run(); showLoader(false); }, 30); } else run();
+    if (needBuild) { showLoader(true, `L${i + 1} を組み立て中…`); setTimeout(() => { run(); showLoader(false); }, 20); } else run();
   }
   function stepTransition(dt) {
     if (!trans) return;
@@ -179,10 +201,19 @@
     const inn = trans.dir > 0 ? 0.4 + 0.6 * e : 2.4 - 1.4 * e;
     if (trans.from) { trans.from.group.scale.setScalar(out); setOpacity(trans.from, 1 - e); }
     trans.to.group.scale.setScalar(inn); setOpacity(trans.to, e);
+    if (focusRing.visible && trans.from && trans.from.zoomSpot) {
+      const sp = trans.from.zoomSpot;
+      focusRing.position.set(sp[0] * out, sp[1] * out, sp[2] * out);
+      focusRing.lookAt(camera.position);
+      const pulse = 1 + trans.t * 1.4;
+      focusRing.scale.setScalar(pulse * (trans.from.zoomRingScale || 1));
+      focusRing.material.opacity = Math.max(0, Math.sin(Math.min(1, trans.t * 1.6) * Math.PI) * 0.88);
+    }
     labelsEl.style.opacity = trans.t > 0.85 ? (trans.t - 0.85) / 0.15 : 0;
     if (trans.t >= 1) {
       if (trans.from) { trans.from.group.visible = false; trans.from.group.scale.setScalar(1); setOpacity(trans.from, 1); }
       trans.to.group.scale.setScalar(1); setOpacity(trans.to, 1);
+      focusRing.visible = false;
       labelsEl.style.opacity = 1;
       trans = null;
     }
@@ -268,13 +299,15 @@
   }
   const tmpV = new THREE.Vector3();
   const safeBox = { x0: 270, x1: 1240, y0: 74, y1: 880 };
+  const flowHud = document.getElementById("flowHud");
   function updateSafeBox() {
     const w = canvas.clientWidth, h = canvas.clientHeight;
     const wide = w > 900;
     const left = document.querySelector(".left").getBoundingClientRect();
+    const hudR = flowHud.getBoundingClientRect();
     const right = panel.getBoundingClientRect();
     if (wide) {
-      safeBox.x0 = Math.max(16, left.right + 14);
+      safeBox.x0 = Math.max(16, Math.max(left.right, hudR.right) + 14);
       safeBox.x1 = Math.min(w - 16, right.left - 14);
       safeBox.y0 = 72;
       safeBox.y1 = h - 78;
@@ -283,7 +316,7 @@
       const zoomR = document.querySelector(".zoombar").getBoundingClientRect();
       safeBox.x0 = 8;
       safeBox.x1 = w - 8;
-      safeBox.y0 = Math.max(64, topR.bottom + 8);
+      safeBox.y0 = Math.max(64, Math.max(topR.bottom, hudR.bottom) + 8);
       safeBox.y1 = Math.max(safeBox.y0 + 120, Math.min(zoomR.top, left.top) - 8);
     }
   }
@@ -354,12 +387,86 @@
 
   // ===== 画面の部品 =====
   const SW = {
-    liver_lobe_mouse: "#942f26", liver_lobe_human: "#a83c2c", gallbladder: "#338c49", hepatic_ducts: "#2f8f56", cbd: "#2f8f56", oddi_sphincter: "#c4584e", portal_vein: "#5a4bc6", hepatic_artery: "#d1322a", hepatic_vein: "#2e5fb5", duodenum_ileum: "#de8274", bdl_ligature: "#ec7e1a", gallstone_gb: "#c89638", gallstone_cbd: "#c89638",
-    lobule_array: "#d47c6c", portal_triad: "#e8d6c0", central_vein: "#2e5fb5", ductular_reaction: "#329e5c", collagen_fibers: "#b48ed4",
-    zone1: "#d96348", zone2: "#e2a43c", zone3: "#5a77c9", sinusoid_flow: "#c82824", bile_flow_reverse: "#22a858",
-    hepatocyte_cord: "#df8c72", lsec: "#e4889a", space_of_disse: "#f0d998", kupffer_cell: "#e86e1a", hsc: "#6d50b8", nk_nkt: "#0ea5c6", canal_of_hering: "#38a07a", portal_iga_plasma: "#b83c98", inflammatory_cells: "#e8a4b8",
-    ntcp: "#285cc4", oatp: "#168c9e", bsep: "#1b9656", mrp2: "#70a820", tight_junction: "#e07018", bile_canaliculus: "#6cc474", bile_acid_pool: "#4c74d4"
+    liver_lobe_mouse: "#942f26", liver_lobe_human: "#a83c2c", gallbladder: "#2aa85e", hepatic_ducts: "#2aa85e", cbd: "#2aa85e", oddi_sphincter: "#c4584e", portal_vein: "#6f5ed8", hepatic_artery: "#e03a32", hepatic_vein: "#3b72cc", duodenum_ileum: "#de8274", bdl_ligature: "#ec7e1a", gallstone_gb: "#c89638", gallstone_cbd: "#c89638",
+    lobule_array: "#d47c6c", portal_triad: "#e8d6c0", central_vein: "#3b72cc", ductular_reaction: "#2aa85e", collagen_fibers: "#b48ed4",
+    zone1: "#d96348", zone2: "#e2a43c", zone3: "#5a77c9", sinusoid_flow: "#e03a32", bile_flow_reverse: "#2aa85e",
+    hepatocyte_cord: "#df8c72", lsec: "#e4889a", space_of_disse: "#f0d998", kupffer_cell: "#e86e1a", hsc: "#6d50b8", nk_nkt: "#0ea5c6", canal_of_hering: "#2aa85e", portal_iga_plasma: "#b83c98", inflammatory_cells: "#e8a4b8",
+    ntcp: "#285cc4", oatp: "#168c9e", bsep: "#1b9656", mrp2: "#70a820", tight_junction: "#e07018", bile_canaliculus: "#2aa85e", bile_acid_pool: "#4c74d4"
   };
+
+  // 全階層共通の血流・胆汁ルート凡例＋拡大現在地図
+  const BLOOD_STEPS = ["門脈・肝動脈", "類洞", "中心静脈", "肝静脈"];
+  const BILE_STEPS = ["毛細胆管", "ヘリング管", "細胆管", "小葉間胆管", "総胆管"];
+  const LEVEL_FLOW = [
+    {
+      blood: [0, 3], bile: [3, 4],
+      title: "L1 臓器全体", sub: "肝葉の中へズームすると小葉へ",
+      svg: `<svg class="fh-svg" viewBox="0 0 52 38"><ellipse cx="22" cy="17" rx="14" ry="10" fill="#b94c3d"/><ellipse cx="34" cy="18" rx="9" ry="7" fill="#c75c4b"/><path d="M26 24v11" stroke="#6f5ed8" stroke-width="3" fill="none"/><path d="M21 24v11" stroke="#2aa85e" stroke-width="2.2" fill="none"/><path d="M31 24v9" stroke="#e03a32" stroke-width="1.8" fill="none"/><path d="M18 4v9" stroke="#3b72cc" stroke-width="3" fill="none"/><rect x="13" y="9" width="26" height="16" rx="4" fill="none" stroke="#ff9f1c" stroke-width="1.6"/></svg>`
+    },
+    {
+      blood: [0, 1, 2], bile: [3],
+      title: "L1 の肝実質を拡大", sub: "六角形の小葉が敷き詰まる",
+      svg: `<svg class="fh-svg" viewBox="0 0 52 38"><ellipse cx="26" cy="19" rx="20" ry="13" fill="#d99484" opacity=".45"/><polygon points="26,9 34,14 34,24 26,29 18,24 18,14" fill="#df9b88" stroke="#b97564" stroke-width="1"/><circle cx="26" cy="19" r="2.6" fill="#3b72cc"/><circle cx="34" cy="14" r="1.8" fill="#6f5ed8"/><circle cx="18" cy="24" r="1.8" fill="#2aa85e"/><rect x="15" y="7" width="22" height="24" rx="4" fill="none" stroke="#ff9f1c" stroke-width="1.7"/></svg>`
+    },
+    {
+      blood: [0, 1, 2], bile: [0, 1, 2, 3],
+      title: "L2 の1つの小葉を拡大", sub: "血は外→中、胆汁は中→外",
+      svg: `<svg class="fh-svg" viewBox="0 0 52 38"><polygon points="26,4 40,12 40,26 26,34 12,26 12,12" fill="#e5a076" stroke="#c07352" stroke-width="1.2"/><circle cx="26" cy="19" r="4" fill="#3b72cc"/><circle cx="40" cy="12" r="2.5" fill="#6f5ed8"/><circle cx="40" cy="26" r="2.5" fill="#2aa85e"/><path d="M37 14L30 18" stroke="#e03a32" stroke-width="1.6"/><path d="M30 21L37 25" stroke="#2aa85e" stroke-width="1.6"/><rect x="25" y="10" width="17" height="17" rx="3" fill="none" stroke="#ff9f1c" stroke-width="1.6"/></svg>`
+    },
+    {
+      blood: [0, 1, 2], bile: [0, 1, 2, 3],
+      title: "L3 の類洞・門脈域を拡大", sub: "右(門脈域)→左(中心静脈)へ血流",
+      svg: `<svg class="fh-svg" viewBox="0 0 52 38"><rect x="4" y="4" width="32" height="8" rx="2" fill="#e49b82"/><rect x="4" y="26" width="32" height="8" rx="2" fill="#e49b82"/><rect x="4" y="14" width="32" height="10" rx="3" fill="#f1b4be"/><rect x="38" y="4" width="10" height="30" rx="3" fill="#e8d8c5"/><rect x="41" y="6" width="4" height="26" rx="1.5" fill="#2aa85e"/><path d="M37 19H9" stroke="#e03a32" stroke-width="1.8"/><path d="M12 8H40" stroke="#2aa85e" stroke-width="1.5"/><rect x="3" y="3" width="46" height="32" rx="4" fill="none" stroke="#ff9f1c" stroke-width="1.5"/></svg>`
+    },
+    {
+      blood: [1], bile: [0],
+      title: "L4 の肝細胞2個＋毛細胆管", sub: "左(類洞)から取込み→右(胆管)へ排出",
+      svg: `<svg class="fh-svg" viewBox="0 0 52 38"><rect x="4" y="5" width="7" height="28" rx="2" fill="#f1b4be"/><rect x="13" y="5" width="34" height="13" rx="3" fill="#eab398"/><rect x="13" y="20" width="34" height="13" rx="3" fill="#eab398"/><circle cx="34" cy="19" r="5" fill="#2aa85e"/><path d="M11 19H27" stroke="#3b72cc" stroke-width="1.8"/><rect x="11" y="4" width="37" height="30" rx="4" fill="none" stroke="#ff9f1c" stroke-width="1.5"/></svg>`
+    }
+  ];
+  function renderFlowHud() {
+    const lv = LEVEL_FLOW[state.level] || LEVEL_FLOW[0];
+    const blocked = state.path !== "normal";
+    const mkChain = (steps, activeIdx, cls, isBile) => steps.map((s, idx) => {
+      const isAct = activeIdx.includes(idx);
+      const isBlk = isBile && blocked && ((state.level === 0 && idx === 4) || (state.level > 0 && isAct && idx === activeIdx[activeIdx.length - 1]));
+      const c = isBlk ? "fh-node blk" : isAct ? `fh-node ${cls}` : "fh-node";
+      return `<span class="${c}">${esc(s)}${isBlk ? "⊘" : ""}</span>` + (idx < steps.length - 1 ? `<span class="fh-arr">→</span>` : "");
+    }).join("");
+    const bileNote = state.path === "bdl" ? "結紮で停滞" : state.path === "gallstone" ? "結石で停滞" : "血と逆向き";
+    flowHud.classList.toggle("open", !!state.hudOpen);
+    flowHud.innerHTML = `
+      <button class="fh-toggle" id="fhToggle" type="button" aria-expanded="${!!state.hudOpen}">
+        <span class="fh-mini-dots">
+          <span><i class="fh-dot" style="background:#6f5ed8"></i>門脈</span>
+          <span><i class="fh-dot" style="background:#e03a32"></i>動脈</span>
+          <span><i class="fh-dot" style="background:#3b72cc"></i>静脈</span>
+          <span><i class="fh-dot" style="background:#2aa85e"></i>胆管</span>
+        </span>
+        <span class="fh-chev">${state.hudOpen ? "▲ 閉じる" : "▼ ルート"}</span>
+      </button>
+      <div class="fh-body">
+        <div class="fh-colors">
+          <div class="fh-c"><i class="fh-dot" style="background:#6f5ed8"></i>門脈（紫）</div>
+          <div class="fh-c"><i class="fh-dot" style="background:#e03a32"></i>肝動脈（赤）</div>
+          <div class="fh-c"><i class="fh-dot" style="background:#3b72cc"></i>中心・肝静脈（青）</div>
+          <div class="fh-c"><i class="fh-dot" style="background:#2aa85e"></i>胆管系（緑）</div>
+        </div>
+        <div class="fh-routes">
+          <div class="fh-row">
+            <div class="fh-lbl"><span>血流（現在区間を強調）</span><span class="fh-dir">門脈域 → 中心</span></div>
+            <div class="fh-chain">${mkChain(BLOOD_STEPS, lv.blood, "act-b", false)}</div>
+          </div>
+          <div class="fh-row">
+            <div class="fh-lbl"><span>胆汁</span><span class="fh-dir">${bileNote}</span></div>
+            <div class="fh-chain">${mkChain(BILE_STEPS, lv.bile, "act-g", true)}</div>
+          </div>
+        </div>
+        <div class="fh-map">${lv.svg}<div class="fh-cap"><b>${esc(lv.title)}</b>${esc(lv.sub)}</div></div>
+      </div>`;
+    const tog = document.getElementById("fhToggle");
+    if (tog) tog.addEventListener("click", () => { state.hudOpen = !state.hudOpen; renderFlowHud(); updateSafeBox(); });
+  }
   const SP = { mouse: "マウス", human: "ヒト" }, PT = { normal: "正常", bdl: "総胆管結紮（BDL）", gallstone: "胆石" };
   const panel = document.getElementById("panel");
   const panelBody = document.getElementById("panelBody");
@@ -395,11 +502,16 @@
     } else if (state.tab === "s") {
       body = `<div class="list">` + L.structures.map((sid) => { const s = A.STRUCTURES[sid]; return `<button class="item" data-sid="${sid}"><i style="background:${SW[sid] || "#ccc"}"></i><span><b>${esc(s.name)}</b><em>${esc(firstSentence(s.desc))}</em></span><u>›</u></button>`; }).join("") + `</div>`;
     } else if (state.tab === "l") {
-      body = `<div class="legend">` + LV.legend.map((g) => `<div><i style="background:${g.color}"></i>${esc(g.label)}</div>`).join("") + `</div><p class="scale-note">段階の間の大きさは模式です（段階の中の位置関係・極性・流れの向きは出典に基づく）。</p>`;
+      const extraLegend = state.level === 3 ? [
+        { color: "#b83c98", label: "二量体IgA（Y字×2＋J鎖）" },
+        { color: "#30d4b0", label: "分泌型IgA（分泌成分付き・胆汁内）" }
+      ] : [];
+      body = `<div class="legend">` + LV.legend.concat(extraLegend).map((g) => `<div><i style="background:${g.color}"></i>${esc(g.label)}</div>`).join("") + `</div><p class="scale-note">段階の間の大きさは模式です（段階の中の位置関係・極性・流れの向きは出典に基づく）。</p>`;
     } else {
       body = `<div class="refs">${refLinks(LV.refs)}</div><p class="scale-note">全24件の一覧と使った箇所は 出典.md にあります。</p>`;
     }
     const lsecNote = state.level === 3 && A.STRUCTURES.lsec && A.STRUCTURES.lsec.speciesNote ? A.STRUCTURES.lsec.speciesNote[state.species] : "";
+    const igaNote = state.level === 3 ? (state.species === "human" ? "主に胆管細胞がpIgRで輸送 → 分泌型IgA（SC付き）" : "肝細胞＋胆管細胞の両方がpIgRで輸送 → 分泌型IgA（SC付き）") : "";
     panelBody.innerHTML = `
       <div class="p-head"><span class="kicker">${LV.code} · ${esc(LV.subtitle)}</span><span class="count">0${state.level + 1} / 05</span></div>
       <h1>${esc(LV.name)}</h1>
@@ -409,6 +521,7 @@
         <div><span>動物種</span><b>${SP[state.species]}</b></div>
         <div class="wide"><span>状態</span><b>${PT[state.path]}</b></div>
         ${lsecNote ? `<div class="wide"><span>LSEC 窓径</span><b>${esc(lsecNote)}</b></div>` : ""}
+        ${igaNote ? `<div class="wide"><span>IgA輸送（pIgR）</span><b>${esc(igaNote)}</b></div>` : ""}
       </div>
       <div class="tabs">${[["s", "構造"], ["l", "凡例"], ["r", "出典"]].map((t) => `<button data-t="${t[0]}" class="${!state.sel && state.tab === t[0] ? "on" : ""}">${t[1]}</button>`).join("")}</div>
       <div class="p-body">${body}</div>`;
@@ -441,11 +554,12 @@
     document.getElementById("btnPlay").textContent = state.playing ? "動き：再生中" : "動き：停止中";
   }
   function rebuildCurrent() {
-    showLoader(true);
+    showLoader(true, "切り替え中…");
     setTimeout(() => {
       const L = ensure(state.level);
       L.group.visible = true; applyXray(L); setOpacity(L, 1);
-      state.sel = null; buildLabels(); renderPanel(); syncNav();
+      state.sel = null; buildLabels(); renderPanel(); renderFlowHud(); syncNav();
+      thumb(state.level);
       showLoader(false);
     }, 20);
   }
@@ -527,38 +641,121 @@
   cam.lastInputReal = -10;
   ["pointerdown", "wheel"].forEach((ev) => canvas.addEventListener(ev, () => { cam.lastInputReal = performance.now() / 1000; }));
 
-  // ===== 起動：5段階を組み立てて、カード用の小さな絵を撮る =====
+  // ===== サムネイル撮影（オフスクリーンRenderTarget：sRGBのまま描画しシェーダ再コンパイルを0にする） =====
+  const TH_SIZE = 160;
+  const thumbRT = new THREE.WebGLRenderTarget(TH_SIZE, TH_SIZE, { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, encoding: THREE.sRGBEncoding });
+  const thumbBuf = new Uint8Array(TH_SIZE * TH_SIZE * 4);
+  const thumbCanvas = document.createElement("canvas");
+  thumbCanvas.width = thumbCanvas.height = TH_SIZE;
+  const thumbCtx = thumbCanvas.getContext("2d");
+  const thumbImg = thumbCtx.createImageData(TH_SIZE, TH_SIZE);
+  const thumbCam = new THREE.PerspectiveCamera(30, 1, 0.1, 100);
+
   function thumb(i) {
     const L = levels[i];
+    if (!L) return;
+    const prevVis = levels.map((o) => (o ? o.group.visible : false));
+    const prevBlob = blob.position.clone();
+    const prevRing = focusRing.visible;
+    const prevKeyT = key.target.position.clone(), prevKeyP = key.position.clone();
     levels.forEach((o) => o && (o.group.visible = false));
     L.group.visible = true;
-    presetCam(L, true, true);
-    camera.position.set(cam.target.x + cam.dist * 0.88 * Math.sin(cam.yaw) * Math.cos(cam.pitch), cam.target.y + cam.dist * 0.88 * Math.sin(cam.pitch), cam.target.z + cam.dist * 0.88 * Math.cos(cam.yaw) * Math.cos(cam.pitch));
-    camera.lookAt(cam.target);
-    camera.clearViewOffset(); camera.aspect = 1; camera.updateProjectionMatrix();
-    renderer.setSize(160, 160, false);
-    renderer.render(scene, camera);
-    document.getElementById("th" + i).src = canvas.toDataURL("image/png");
-    L.group.visible = false;
+    focusRing.visible = false;
+    const c = L.cam;
+    const d = c.dist * 0.88;
+    thumbCam.position.set(
+      c.target[0] + d * Math.sin(c.yaw) * Math.cos(c.pitch),
+      c.target[1] + d * Math.sin(c.pitch),
+      c.target[2] + d * Math.cos(c.yaw) * Math.cos(c.pitch)
+    );
+    thumbCam.lookAt(c.target[0], c.target[1], c.target[2]);
+    blob.position.set(c.target[0], L.floorY, c.target[2]);
+    key.target.position.set(c.target[0], c.target[1], c.target[2]);
+    key.position.set(c.target[0] + 5, c.target[1] + 9, c.target[2] + 7);
+    const prevRT = renderer.getRenderTarget();
+    renderer.setRenderTarget(thumbRT);
+    renderer.clear();
+    renderer.render(scene, thumbCam);
+    renderer.readRenderTargetPixels(thumbRT, 0, 0, TH_SIZE, TH_SIZE, thumbBuf);
+    renderer.setRenderTarget(prevRT);
+    levels.forEach((o, k) => o && (o.group.visible = prevVis[k]));
+    blob.position.copy(prevBlob);
+    focusRing.visible = prevRing;
+    key.target.position.copy(prevKeyT);
+    key.position.copy(prevKeyP);
+    // 上下反転＋背景クリーム色合成（sRGB出力済みなのでガンマ変換不要）
+    const dst = thumbImg.data;
+    const bgR = 244, bgG = 237, bgB = 228;
+    for (let y = 0; y < TH_SIZE; y++) {
+      const sy = (TH_SIZE - 1 - y) * TH_SIZE * 4;
+      const dy = y * TH_SIZE * 4;
+      for (let x = 0; x < TH_SIZE * 4; x += 4) {
+        const a = thumbBuf[sy + x + 3] / 255;
+        const ia = 1 - a;
+        dst[dy + x] = Math.round(thumbBuf[sy + x] * a + bgR * ia);
+        dst[dy + x + 1] = Math.round(thumbBuf[sy + x + 1] * a + bgG * ia);
+        dst[dy + x + 2] = Math.round(thumbBuf[sy + x + 2] * a + bgB * ia);
+        dst[dy + x + 3] = 255;
+      }
+    }
+    thumbCtx.putImageData(thumbImg, 0, 0);
+    const imgEl = document.getElementById("th" + i);
+    if (imgEl) { imgEl.src = thumbCanvas.toDataURL("image/png"); imgEl.classList.add("ready"); }
   }
+
+  // ===== 起動：L1だけ先に組んで即表示 → 残りL2〜L5は裏で1つずつ組み立てる =====
   renderCards();
+  renderFlowHud();
   const bootStart = performance.now();
-  let bi = 0;
+  const scheduleIdle = (fn) => {
+    if (typeof window.requestIdleCallback === "function") window.requestIdleCallback(fn, { timeout: 120 });
+    else setTimeout(fn, 35);
+  };
+  function buildRemaining(idx) {
+    if (idx >= 5) {
+      if (!window.__liver.allBuiltMs) {
+        window.__liver.allBuiltMs = Math.round(performance.now() - bootStart);
+        console.info(`[LiverAtlas] allBuiltMs (L1-L5 ready): ${window.__liver.allBuiltMs} ms`, buildMs);
+      }
+      return;
+    }
+    scheduleIdle(() => {
+      if (trans) { setTimeout(() => buildRemaining(idx), 120); return; }
+      try {
+        ensure(idx);
+        thumb(idx);
+      } catch (err) { console.error(err); }
+      buildRemaining(idx + 1);
+    });
+  }
   function boot() {
-    showLoader(true, `立体を組み立て中… ${bi + 1} / 5`);
+    showLoader(true, "立体を組み立て中…");
     setTimeout(() => {
-      try { ensure(bi); thumb(bi); } catch (err) { console.error(err); showLoader(true, "組み立てに失敗しました：" + err.message); return; }
-      bi++;
-      if (bi < 5) boot();
-      else {
-        const L = levels[0]; L.group.visible = true; presetCam(L, true);
-        state.level = 0; applyXray(L); buildLabels(); renderPanel(); syncNav(); resize();
+      try {
+        const L = ensure(0);
+        L.group.visible = true;
+        presetCam(L, true);
+        state.level = 0;
+        applyXray(L);
+        buildLabels();
+        renderPanel();
+        renderFlowHud();
+        syncNav();
+        resize();
         showLoader(false);
         window.__liver.bootMs = Math.round(performance.now() - bootStart);
+        console.info(`[LiverAtlas] bootMs (L1 interactive): ${window.__liver.bootMs} ms`);
         requestAnimationFrame(frame);
+        setTimeout(() => {
+          try { thumb(0); } catch (err) { console.error(err); }
+          buildRemaining(1);
+        }, 60);
+      } catch (err) {
+        console.error(err);
+        showLoader(true, "組み立てに失敗しました：" + err.message);
       }
-    }, 10);
+    }, 0);
   }
+  window.__liver = { state, levels, goLevel, select, toggleXray, applyXray, setDrawer, resize, camera, renderer, bootMs: 0, allBuiltMs: 0, buildMs, isTransitioning: () => !!trans };
   boot();
-  window.__liver = { state, levels, goLevel, select, toggleXray, applyXray, setDrawer, resize, camera, renderer, bootMs: 0 };
 })();

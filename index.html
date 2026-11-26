@@ -47,12 +47,39 @@
   .card { width: 100%; display: flex; align-items: center; gap: 10px; padding: 8px; margin-bottom: 8px; border-radius: 14px; background: rgba(255, 255, 255, .55); border: 1px solid transparent; text-align: left; transition: background .2s, box-shadow .2s; }
   .card:hover { background: rgba(255, 255, 255, .8); }
   .card.on { background: var(--card-strong); border-color: var(--line); box-shadow: var(--shadow); }
-  .card img { width: 46px; height: 46px; border-radius: 10px; background: #f3ece3; object-fit: cover; flex: none; }
+  .card img { width: 46px; height: 46px; border-radius: 10px; background: #f3ece3; object-fit: cover; flex: none; opacity: 0; transition: opacity .25s; }
+  .card img.ready { opacity: 1; }
   .card span { flex: 1; min-width: 0; }
   .card b { display: block; font-size: 13px; }
   .card em { display: block; font-style: normal; font-size: 11px; color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .card u { text-decoration: none; color: var(--soft); font-size: 16px; }
   .cards-foot { font-size: 11px; color: var(--soft); padding: 6px 10px; }
+
+  /* 血流・胆汁ルート凡例＋拡大現在地図（全階層共通） */
+  #flowHud {
+    position: fixed; left: 20px; bottom: 64px; width: 244px; z-index: 15;
+    background: var(--card-strong); border: 1px solid var(--line); border-radius: 16px;
+    box-shadow: var(--shadow); backdrop-filter: blur(10px);
+    padding: 10px 12px; font-size: 10.5px; color: var(--ink);
+  }
+  .fh-toggle { display: none; }
+  .fh-colors { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 8px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+  .fh-c { display: flex; align-items: center; gap: 5px; font-weight: 700; font-size: 10.5px; color: #3c332b; }
+  .fh-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; box-shadow: inset 0 -1px 2px rgba(0,0,0,.22); }
+  .fh-routes { display: flex; flex-direction: column; gap: 6px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .fh-row { display: flex; flex-direction: column; gap: 3px; }
+  .fh-lbl { font-size: 9.5px; font-weight: 700; color: var(--muted); display: flex; align-items: center; justify-content: space-between; }
+  .fh-lbl .fh-dir { font-weight: 600; color: #8c7e70; }
+  .fh-chain { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; line-height: 1.3; }
+  .fh-node { padding: 1.5px 5px; border-radius: 6px; background: #f4eee6; color: #7a6e63; font-size: 9.5px; font-weight: 600; white-space: nowrap; }
+  .fh-node.act-b { background: #fdeaea; color: #b5241e; font-weight: 700; box-shadow: 0 0 0 1px rgba(224,58,50,.32); }
+  .fh-node.act-g { background: #e6f6ec; color: #197a42; font-weight: 700; box-shadow: 0 0 0 1px rgba(42,168,94,.36); }
+  .fh-node.blk { background: #fff0e0; color: #c4540c; font-weight: 700; box-shadow: 0 0 0 1px rgba(236,126,26,.45); }
+  .fh-arr { color: #b3a596; font-size: 9px; font-weight: 700; }
+  .fh-map { padding-top: 7px; display: flex; align-items: center; gap: 8px; }
+  .fh-svg { width: 52px; height: 38px; flex: none; border-radius: 8px; background: #f7f2eb; border: 1px solid var(--line); overflow: hidden; }
+  .fh-cap { font-size: 10px; line-height: 1.4; color: #544a40; }
+  .fh-cap b { display: block; font-size: 10.5px; color: var(--ink); }
 
   /* 右の解説パネル */
   #panel { position: fixed; right: 20px; top: 84px; bottom: 20px; width: 340px; z-index: 15; background: var(--card-strong); border: 1px solid var(--line); border-radius: 20px; box-shadow: var(--shadow); padding: 20px 20px 16px; overflow-y: auto; scrollbar-width: thin; }
@@ -116,7 +143,7 @@
   #loader.on { opacity: 1; }
   #loader span { font-size: 13px; color: var(--muted); padding: 10px 16px; border-radius: 999px; background: var(--card-strong); box-shadow: var(--shadow); }
 
-  @media (max-width: 1180px) { #panel { width: 300px; } .left { width: 200px; } .card em { display: none; } }
+  @media (max-width: 1180px) { #panel { width: 300px; } .left { width: 200px; } .card em { display: none; } #flowHud { width: 210px; padding: 8px 10px; } }
   @media (max-width: 900px) {
     .top { flex-wrap: wrap; height: auto; left: 10px; right: 10px; top: 8px; gap: 6px 8px; }
     .brand { order: 1; margin-right: auto; font-size: 14px; }
@@ -126,6 +153,20 @@
     .seg { padding: 2px; }
     .seg button { padding: 5px 10px; font-size: 11.5px; }
     .chip { padding: 5px 10px; font-size: 11.5px; }
+    #flowHud {
+      left: 10px; right: 10px; top: 76px; bottom: auto; width: auto;
+      padding: 0; border-radius: 12px; z-index: 18;
+    }
+    .fh-toggle {
+      display: flex; align-items: center; justify-content: space-between; gap: 6px;
+      width: 100%; padding: 5px 10px; font-size: 10px; font-weight: 700; color: #3c332b;
+    }
+    .fh-mini-dots { display: flex; align-items: center; gap: 7px; flex-wrap: nowrap; overflow: hidden; }
+    .fh-mini-dots span { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
+    .fh-chev { color: var(--muted); font-size: 10px; flex: none; }
+    #flowHud:not(.open) .fh-body { display: none; }
+    #flowHud.open .fh-body { padding: 6px 10px 8px; border-top: 1px solid var(--line); }
+    #flowHud .fh-colors { display: none; }
     .left {
       top: auto; bottom: 52px; left: 10px; right: 10px; width: auto;
       display: flex; gap: 6px; overflow-x: auto; padding: 2px 0;
@@ -184,6 +225,9 @@
     .logo { width: 15px; height: 15px; }
     .seg button { padding: 4px 7.5px; font-size: 10.5px; }
     .chip { padding: 4px 7.5px; font-size: 10.5px; }
+    #flowHud { left: 8px; right: 8px; top: 68px; }
+    .fh-toggle { padding: 4px 8px; font-size: 9.5px; }
+    .fh-mini-dots { gap: 5px; }
     .left { left: 8px; right: 8px; }
     .zoombar { bottom: 108px; padding: 3px 6px; gap: 2px; }
     .zoombar > button { width: 24px; height: 24px; font-size: 13px; }
@@ -207,6 +251,7 @@
 </header>
 
 <aside class="left" id="cards"></aside>
+<aside id="flowHud" aria-label="血流・胆汁ルート凡例"></aside>
 <section id="panel">
   <button class="drawer-bar" id="drawerBar" type="button" aria-expanded="false">
     <span class="drawer-grip"></span>

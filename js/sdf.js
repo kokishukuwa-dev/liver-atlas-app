@@ -38,17 +38,28 @@
   }
   S.noise = noise;
   S.fbm = (x, y, z) => noise(x, y, z) * 0.6 + noise(x * 2.1, y * 2.1, z * 2.1) * 0.3 + noise(x * 4.3, y * 4.3, z * 4.3) * 0.1;
-  // 細胞・小葉模様用の軽量ボロノイ風パターン（0=中心, 1=境界付近）
+  // 細胞・小葉模様用の軽量ボロノイ風パターン（2×2×2近傍・1セル1ハッシュ超高速版）
   S.cellPattern = (x, y, z) => {
-    const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+    const xi = Math.floor(x - 0.5), yi = Math.floor(y - 0.5), zi = Math.floor(z - 0.5);
     let d1 = 9, d2 = 9;
-    for (let dz = -1; dz <= 1; dz++) for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
-      const cx = xi + dx, cy = yi + dy, cz = zi + dz;
-      const px = cx + 0.18 + 0.64 * hash(cx, cy, cz);
-      const py = cy + 0.18 + 0.64 * hash(cx + 31, cy + 17, cz + 53);
-      const pz = cz + 0.18 + 0.64 * hash(cx + 71, cy + 43, cz + 19);
-      const d = (x - px) * (x - px) + (y - py) * (y - py) + (z - pz) * (z - pz);
-      if (d < d1) { d2 = d1; d1 = d; } else if (d < d2) d2 = d;
+    const inv1023 = 0.64 / 1023;
+    for (let dz = 0; dz <= 1; dz++) {
+      const cz = zi + dz, hZ = Math.imul(cz, 1440662683);
+      for (let dy = 0; dy <= 1; dy++) {
+        const cy = yi + dy, hYZ = Math.imul(cy, 668265263) ^ hZ;
+        for (let dx = 0; dx <= 1; dx++) {
+          const cx = xi + dx;
+          let h = Math.imul(cx, 374761393) ^ hYZ;
+          h = Math.imul(h ^ (h >>> 13), 1274126177);
+          h ^= h >>> 16;
+          const u = h >>> 0;
+          const px = cx + 0.18 + (u & 1023) * inv1023;
+          const py = cy + 0.18 + ((u >>> 10) & 1023) * inv1023;
+          const pz = cz + 0.18 + ((u >>> 20) & 1023) * inv1023;
+          const d = (x - px) * (x - px) + (y - py) * (y - py) + (z - pz) * (z - pz);
+          if (d < d1) { d2 = d1; d1 = d; } else if (d < d2) d2 = d;
+        }
+      }
     }
     return Math.sqrt(d2) - Math.sqrt(d1);
   };
@@ -205,16 +216,79 @@
     const ox = bmin[0] - h * 0.5, oy = bmin[1] - h * 0.5, oz = bmin[2] - h * 0.5;
     const v = new Float32Array(nx * ny * nz);
     const nyNx = nx * ny;
-    // 外周は+hで初期化し、内部のみ評価
+    // 外周は+hで初期化し、粗ブロック（4×4×4）で遠い空間を安全に間引きながら評価
     v.fill(h);
-    for (let k = 1; k < nz - 1; k++) {
-      const z = oz + k * h;
-      const kOff = k * nyNx;
-      for (let j = 1; j < ny - 1; j++) {
-        const y = oy + j * h;
-        let idx = kOff + j * nx + 1;
-        for (let i = 1; i < nx - 1; i++) {
-          v[idx++] = f(ox + i * h, y, z);
+    const B = 4;
+    const useCoarse = nx >= 12 && ny >= 12 && nz >= 12 && opt.coarse !== false;
+    if (useCoarse) {
+      const cThresh = h * B * 1.45; // 4h立方体の中心→角距離(3.46h)に余裕を足した安全しきい値
+      const skipInt = opt.skipInterior === true;
+      const bxN = Math.ceil((nx - 2) / B), byN = Math.ceil((ny - 2) / B), bzN = Math.ceil((nz - 2) / B);
+      const gnx = bxN + 1, gny = byN + 1, gnz = bzN + 1;
+      const gnyGnx = gnx * gny;
+      const cvg = new Float32Array(gnx * gny * gnz);
+      for (let bk = 0; bk < gnz; bk++) {
+        const k = Math.min(nz - 2, 1 + bk * B), z = oz + k * h, kOff = bk * gnyGnx;
+        for (let bj = 0; bj < gny; bj++) {
+          const j = Math.min(ny - 2, 1 + bj * B), y = oy + j * h, jOff = kOff + bj * gnx;
+          for (let bi = 0; bi < gnx; bi++) {
+            const i = Math.min(nx - 2, 1 + bi * B);
+            cvg[jOff + bi] = f(ox + i * h, y, z);
+          }
+        }
+      }
+      for (let bk = 0; bk < bzN; bk++) {
+        const k0 = 1 + bk * B, k1 = Math.min(nz - 1, k0 + B);
+        const gk0 = bk * gnyGnx, gk1 = (bk + 1) * gnyGnx;
+        for (let bj = 0; bj < byN; bj++) {
+          const j0 = 1 + bj * B, j1 = Math.min(ny - 1, j0 + B);
+          const gj0 = bj * gnx, gj1 = (bj + 1) * gnx;
+          for (let bi = 0; bi < bxN; bi++) {
+            const i0 = 1 + bi * B, i1 = Math.min(nx - 1, i0 + B);
+            const c0 = cvg[gk0 + gj0 + bi], c1 = cvg[gk0 + gj0 + bi + 1];
+            const c2 = cvg[gk0 + gj1 + bi], c3 = cvg[gk0 + gj1 + bi + 1];
+            const c4 = cvg[gk1 + gj0 + bi], c5 = cvg[gk1 + gj0 + bi + 1];
+            const c6 = cvg[gk1 + gj1 + bi], c7 = cvg[gk1 + gj1 + bi + 1];
+            const minC = Math.min(c0, c1, c2, c3, c4, c5, c6, c7);
+            if (minC > cThresh) {
+              // 完全に外側（空気）：表面は絶対に通らないので +cThresh で埋める
+              for (let k = k0; k < k1; k++) {
+                const offK = k * nyNx;
+                for (let j = j0; j < j1; j++) v.fill(cThresh, offK + j * nx + i0, offK + j * nx + i1);
+              }
+              continue;
+            }
+            if (skipInt) {
+              const maxC = Math.max(c0, c1, c2, c3, c4, c5, c6, c7);
+              if (maxC < -cThresh) {
+                for (let k = k0; k < k1; k++) {
+                  const offK = k * nyNx;
+                  for (let j = j0; j < j1; j++) v.fill(-cThresh, offK + j * nx + i0, offK + j * nx + i1);
+                }
+                continue;
+              }
+            }
+            for (let k = k0; k < k1; k++) {
+              const z = oz + k * h, offK = k * nyNx;
+              for (let j = j0; j < j1; j++) {
+                const y = oy + j * h;
+                let idx = offK + j * nx + i0;
+                for (let i = i0; i < i1; i++) v[idx++] = f(ox + i * h, y, z);
+              }
+            }
+          }
+        }
+      }
+    } else {
+      for (let k = 1; k < nz - 1; k++) {
+        const z = oz + k * h;
+        const kOff = k * nyNx;
+        for (let j = 1; j < ny - 1; j++) {
+          const y = oy + j * h;
+          let idx = kOff + j * nx + 1;
+          for (let i = 1; i < nx - 1; i++) {
+            v[idx++] = f(ox + i * h, y, z);
+          }
         }
       }
     }
@@ -287,9 +361,14 @@
     for (let q = 0; q < nV; q++) {
       const q3 = q * 3;
       const x = pos[q3], y = pos[q3 + 1], z = pos[q3 + 2];
-      let gx = f(x + e, y, z) - f(x - e, y, z);
-      let gy = f(x, y + e, z) - f(x, y - e, z);
-      let gz = f(x, y, z + e) - f(x, y, z - e);
+      // 4タップ四面体勾配（6タップ比33%高速・エッジ鮮明）
+      const t0 = f(x + e, y - e, z - e);
+      const t1 = f(x - e, y - e, z + e);
+      const t2 = f(x - e, y + e, z - e);
+      const t3 = f(x + e, y + e, z + e);
+      let gx = t0 - t1 - t2 + t3;
+      let gy = -t0 - t1 + t2 + t3;
+      let gz = -t0 + t1 - t2 + t3;
       const gl = Math.sqrt(gx * gx + gy * gy + gz * gz) || 1;
       gx /= gl; gy /= gl; gz /= gl;
       nor[q3] = gx; nor[q3 + 1] = gy; nor[q3 + 2] = gz;

@@ -1,4 +1,4 @@
-const CACHE_NAME = "liver-atlas-v2";
+const CACHE_NAME = "liver-atlas-v3";
 const CORE_FILES = [
   "./", "./index.html", "./manifest.json",
   "./js/three.min.js", "./js/data.js", "./js/sdf.js", "./js/levels.js", "./js/main.js",
