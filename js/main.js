@@ -290,6 +290,7 @@
   function placeLabels() {
     const L = levels[state.level]; if (!L || !labelEls.length) return;
     const w = canvas.clientWidth, h = canvas.clientHeight;
+    if (!w || !h || !isFinite(camera.aspect)) return;
     const wide = w > 900;
     const kx = wide ? Math.min(1, w / 1400) : Math.min(0.85, (safeBox.x1 - safeBox.x0) / 860);
     const ky = wide ? Math.min(1, w / 1400) : Math.min(0.85, (safeBox.y1 - safeBox.y0) / 720);
@@ -470,6 +471,8 @@
   // ===== 大きさ =====
   function resize() {
     const w = canvas.clientWidth, h = canvas.clientHeight;
+    // 最小化・非表示のタブでは幅か高さが0になり、縦横比がNaNになってラベル座標が壊れるので待つ
+    if (!w || !h) return;
     renderer.setSize(w, h, false);
     camera.aspect = w / h;
     const left = document.querySelector(".left").getBoundingClientRect(), right = panel.getBoundingClientRect();
