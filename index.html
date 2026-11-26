@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>肝臓アトラス</title>
+<link rel="manifest" href="manifest.json" />
+<link rel="icon" href="icon-192.png" />
+<link rel="apple-touch-icon" href="apple-touch-icon.png" />
+<meta name="theme-color" content="#f6f0e6" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<style>
+  :root {
+    --bg1: #fbf8f3; --bg2: #efe7dc;
+    --card: rgba(255, 255, 255, 0.82); --card-strong: rgba(255, 255, 255, 0.95);
+    --line: rgba(60, 45, 30, 0.10); --ink: #1f1a16; --muted: #7a6e63; --soft: #a59889;
+    --accent: #8a5cf0; --shadow: 0 10px 30px rgba(90, 70, 50, 0.10), 0 2px 6px rgba(90, 70, 50, 0.06);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 100%; height: 100%; overflow: hidden; }
+  body {
+    font-family: "BIZ UDPGothic", "Yu Gothic UI", "Hiragino Sans", "Meiryo", system-ui, sans-serif;
+    color: var(--ink);
+    background: radial-gradient(ellipse at 48% 46%, var(--bg1) 0%, #f6f1ea 45%, var(--bg2) 100%);
+    -webkit-font-smoothing: antialiased;
+  }
+  #gl { position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
+  #gl:active { cursor: grabbing; }
+  button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+
+  /* 上の帯 */
+  .top { position: fixed; top: 16px; left: 20px; right: 20px; height: 44px; display: flex; align-items: center; gap: 14px; z-index: 20; pointer-events: none; }
+  .top > * { pointer-events: auto; }
+  .brand { display: flex; align-items: center; gap: 9px; font-weight: 700; font-size: 15px; letter-spacing: .02em; margin-right: auto; }
+  .logo { width: 18px; height: 18px; border-radius: 50%; background: radial-gradient(circle at 35% 35%, #f2b9a6, #b04a3a 60%, #7d2d24); box-shadow: 0 2px 6px rgba(176, 74, 58, .35); }
+  .seg { display: flex; background: var(--card); border: 1px solid var(--line); border-radius: 999px; padding: 3px; box-shadow: var(--shadow); backdrop-filter: blur(10px); }
+  .seg button { padding: 6px 13px; border-radius: 999px; font-size: 12.5px; color: var(--muted); }
+  .seg button.on { background: #fff; color: var(--ink); font-weight: 700; box-shadow: 0 1px 4px rgba(0, 0, 0, .08); }
+  .tools { display: flex; gap: 8px; margin-left: auto; }
+  .chip { padding: 7px 13px; border-radius: 999px; font-size: 12.5px; background: var(--card); border: 1px solid var(--line); box-shadow: var(--shadow); color: var(--muted); transition: opacity .15s, color .15s; }
+  .chip.on { color: var(--ink); font-weight: 700; background: #fff; }
+  .chip:disabled { opacity: 0.38; cursor: default; pointer-events: none; }
+
+  /* 左の階層カード */
+  .left { position: fixed; left: 20px; top: 84px; width: 236px; z-index: 15; }
+  .card { width: 100%; display: flex; align-items: center; gap: 10px; padding: 8px; margin-bottom: 8px; border-radius: 14px; background: rgba(255, 255, 255, .55); border: 1px solid transparent; text-align: left; transition: background .2s, box-shadow .2s; }
+  .card:hover { background: rgba(255, 255, 255, .8); }
+  .card.on { background: var(--card-strong); border-color: var(--line); box-shadow: var(--shadow); }
+  .card img { width: 46px; height: 46px; border-radius: 10px; background: #f3ece3; object-fit: cover; flex: none; }
+  .card span { flex: 1; min-width: 0; }
+  .card b { display: block; font-size: 13px; }
+  .card em { display: block; font-style: normal; font-size: 11px; color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card u { text-decoration: none; color: var(--soft); font-size: 16px; }
+  .cards-foot { font-size: 11px; color: var(--soft); padding: 6px 10px; }
+
+  /* 右の解説パネル */
+  #panel { position: fixed; right: 20px; top: 84px; bottom: 20px; width: 340px; z-index: 15; background: var(--card-strong); border: 1px solid var(--line); border-radius: 20px; box-shadow: var(--shadow); padding: 20px 20px 16px; overflow-y: auto; scrollbar-width: thin; }
+  .drawer-bar { display: none; }
+  .p-head { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--muted); }
+  #panel h1 { font-size: 30px; line-height: 1.2; margin: 10px 0 10px; letter-spacing: .01em; }
+  .sum { font-size: 13px; line-height: 1.75; color: #4b423a; }
+  .meta { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 14px; margin: 16px 0 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+  .meta span { display: block; font-size: 11px; color: var(--muted); }
+  .meta b { display: block; font-size: 12.5px; margin-top: 3px; line-height: 1.45; }
+  .meta .wide { grid-column: 1 / -1; }
+  .tabs { display: flex; gap: 4px; background: #f5efe8; border-radius: 999px; padding: 3px; margin-bottom: 12px; }
+  .tabs button { flex: 1; padding: 6px 0; border-radius: 999px; font-size: 12.5px; color: var(--muted); }
+  .tabs button.on { background: #fff; color: var(--ink); font-weight: 700; box-shadow: 0 1px 4px rgba(0, 0, 0, .07); }
+  .item { width: 100%; display: flex; gap: 11px; align-items: center; padding: 9px 6px; border-radius: 12px; text-align: left; }
+  .item:hover { background: #faf6f1; }
+  .item i, .d-head i, .legend i { flex: none; width: 34px; height: 34px; border-radius: 10px; box-shadow: inset 0 -6px 10px rgba(0, 0, 0, .12), inset 0 4px 8px rgba(255, 255, 255, .45); }
+  .item span { flex: 1; min-width: 0; }
+  .item b { display: block; font-size: 12.5px; line-height: 1.35; }
+  .item em { display: block; font-style: normal; font-size: 11px; color: var(--muted); margin-top: 2px; line-height: 1.4; }
+  .item u { text-decoration: none; width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--line); display: grid; place-items: center; color: var(--soft); font-size: 13px; flex: none; }
+  .legend div { display: flex; align-items: center; gap: 10px; font-size: 12.5px; padding: 5px 0; }
+  .legend i { width: 22px; height: 22px; border-radius: 7px; }
+  .scale-note { font-size: 11px; color: var(--muted); margin-top: 12px; line-height: 1.6; }
+  .refs { display: flex; flex-direction: column; gap: 6px; }
+  .ref { display: block; font-size: 11.5px; color: #4b423a; text-decoration: none; padding: 7px 9px; border-radius: 9px; background: #faf6f1; line-height: 1.45; }
+  .ref:hover { background: #f1e9df; }
+  .ref span { color: var(--accent); font-weight: 700; margin-right: 6px; }
+  .back { font-size: 12px; color: var(--muted); margin-bottom: 10px; }
+  .d-head { display: flex; gap: 12px; align-items: center; }
+  .d-head h2 { font-size: 16px; line-height: 1.4; }
+  .en { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .d-desc { font-size: 13px; line-height: 1.8; margin: 12px 0; color: #3b332c; }
+  .note { font-size: 12px; line-height: 1.7; padding: 9px 11px; border-radius: 10px; margin-bottom: 8px; }
+  .note b { display: block; font-size: 11px; margin-bottom: 2px; }
+  .note.sp { background: #f1ecfb; } .note.st { background: #fdf1e4; } .note.sc { background: #eef4f8; }
+  .sub { font-size: 11px; color: var(--muted); margin: 12px 0 6px; }
+
+  /* 下：ズームの帯 */
+  .tagline { position: fixed; left: 24px; bottom: 22px; font-size: 12.5px; line-height: 1.5; color: #4b423a; z-index: 10; font-weight: 700; }
+  .zoombar { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 6px; padding: 6px 10px; background: var(--card-strong); border: 1px solid var(--line); border-radius: 999px; box-shadow: var(--shadow); z-index: 16; }
+  .zoombar > button { width: 30px; height: 30px; border-radius: 50%; color: var(--muted); font-size: 16px; }
+  .zoombar > button:hover { background: #f5efe8; color: var(--ink); }
+  #zr { -webkit-appearance: none; appearance: none; width: 150px; height: 3px; background: #e6ddd2; border-radius: 3px; }
+  #zr::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%; background: #fff; border: 2px solid var(--ink); }
+  #ticks { display: flex; gap: 2px; margin-left: 6px; flex: none; }
+  #ticks button { font-size: 11px; padding: 5px 7px; border-radius: 8px; color: var(--soft); white-space: nowrap; flex: none; }
+  #ticks button.on { color: var(--ink); font-weight: 700; background: #f5efe8; }
+
+  /* 3Dの上のラベル */
+  #labels { position: fixed; inset: 0; pointer-events: none; z-index: 12; transition: opacity .2s; }
+  #lines { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #lines line { stroke: rgba(55, 42, 30, .42); stroke-width: 1.15; stroke-linecap: round; }
+  #lines circle { fill: #fff; stroke: rgba(45, 34, 24, .65); stroke-width: 1.3; }
+  .lbl { position: absolute; left: 0; top: 0; pointer-events: auto; white-space: nowrap; font-size: 11px; font-weight: 700; padding: 4px 9px; border-radius: 999px; background: rgba(255, 255, 255, .95); border: 1px solid rgba(60, 45, 30, 0.13); box-shadow: 0 3px 10px rgba(60, 45, 30, .12), 0 1px 2px rgba(60, 45, 30, .06); color: var(--ink); transition: background .15s, color .15s; }
+  .lbl:hover, .lbl.sel { background: var(--ink); color: #fff; }
+  .lbl.plain { pointer-events: none; color: var(--muted); font-weight: 600; background: rgba(255, 255, 255, .86); }
+  #tip { position: fixed; z-index: 30; pointer-events: none; font-size: 12px; padding: 5px 9px; background: rgba(31, 26, 22, .88); color: #fff; border-radius: 8px; opacity: 0; transition: opacity .12s; }
+  #tip.on { opacity: 1; }
+  #loader { position: fixed; inset: 0; display: grid; place-items: center; z-index: 40; pointer-events: none; opacity: 0; transition: opacity .25s; }
+  #loader.on { opacity: 1; }
+  #loader span { font-size: 13px; color: var(--muted); padding: 10px 16px; border-radius: 999px; background: var(--card-strong); box-shadow: var(--shadow); }
+
+  @media (max-width: 1180px) { #panel { width: 300px; } .left { width: 200px; } .card em { display: none; } }
+  @media (max-width: 900px) {
+    .top { flex-wrap: wrap; height: auto; left: 10px; right: 10px; top: 8px; gap: 6px 8px; }
+    .brand { order: 1; margin-right: auto; font-size: 14px; }
+    .tools { order: 2; margin-left: 0; gap: 5px; }
+    #species { order: 3; }
+    #state { order: 4; }
+    .seg { padding: 2px; }
+    .seg button { padding: 5px 10px; font-size: 11.5px; }
+    .chip { padding: 5px 10px; font-size: 11.5px; }
+    .left {
+      top: auto; bottom: 52px; left: 10px; right: 10px; width: auto;
+      display: flex; gap: 6px; overflow-x: auto; padding: 2px 0;
+      scrollbar-width: none; -webkit-overflow-scrolling: touch; z-index: 16;
+    }
+    .left::-webkit-scrollbar { display: none; }
+    .card { flex: none; width: auto; margin: 0; padding: 4px 10px 4px 5px; gap: 7px; border-radius: 12px; background: rgba(255, 255, 255, .78); border: 1px solid var(--line); }
+    .card img { width: 34px; height: 34px; border-radius: 8px; }
+    .card b { font-size: 11.5px; white-space: nowrap; }
+    .card em, .card u, .cards-foot { display: none; }
+    .zoombar {
+      display: flex;
+      bottom: 108px;
+      padding: 4px 8px;
+      gap: 4px;
+      max-width: calc(100vw - 16px);
+      z-index: 16;
+    }
+    .zoombar > button { width: 28px; height: 28px; font-size: 15px; flex: none; }
+    #zr { width: 108px; }
+    #ticks { margin-left: 4px; }
+    #ticks button { font-size: 10.5px; padding: 4px 6px; }
+    .tagline { display: none; }
+    #panel {
+      left: 0; right: 0; top: auto; bottom: 0; width: auto;
+      height: 46px; max-height: 60vh;
+      border-radius: 18px 18px 0 0;
+      padding: 0;
+      overflow: hidden;
+      display: flex; flex-direction: column;
+      transition: height .24s cubic-bezier(.22, 1, .36, 1);
+      z-index: 25;
+    }
+    #panel.open { height: 54vh; background: #fffdfb; }
+    .drawer-bar {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      flex: none; height: 46px; width: 100%; padding: 0 16px;
+      position: relative; text-align: left;
+      border-bottom: 1px solid transparent;
+    }
+    #panel.open .drawer-bar { border-bottom-color: var(--line); }
+    .drawer-grip {
+      position: absolute; top: 6px; left: 50%; transform: translateX(-50%);
+      width: 36px; height: 4px; border-radius: 999px; background: rgba(60, 45, 30, 0.22);
+    }
+    .drawer-title { font-size: 12.5px; font-weight: 700; color: var(--ink); padding-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .drawer-chev { font-size: 11px; color: var(--muted); padding-top: 6px; flex: none; }
+    #panelBody { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 16px 18px; scrollbar-width: thin; }
+    #panel:not(.open) #panelBody { display: none; }
+    #panel h1 { font-size: 24px; }
+    .lbl { font-size: 9.5px; padding: 2.5px 6px; max-width: 196px; overflow: hidden; text-overflow: ellipsis; }
+  }
+  @media (max-width: 600px) {
+    .top { left: 8px; right: 8px; top: 8px; gap: 5px 6px; }
+    .brand { font-size: 13px; gap: 6px; }
+    .logo { width: 15px; height: 15px; }
+    .seg button { padding: 4px 7.5px; font-size: 10.5px; }
+    .chip { padding: 4px 7.5px; font-size: 10.5px; }
+    .left { left: 8px; right: 8px; }
+    .zoombar { bottom: 108px; padding: 3px 6px; gap: 2px; }
+    .zoombar > button { width: 24px; height: 24px; font-size: 13px; }
+    #zr { width: 52px; }
+    #ticks { gap: 1px; margin-left: 2px; }
+    #ticks button { font-size: 10px; padding: 4px 4px; }
+    .lbl { font-size: 8.5px; padding: 2px 5px; max-width: 134px; }
+    #panel h1 { font-size: 21px; }
+  }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="labels"><svg id="lines"></svg></div>
+
+<header class="top">
+  <div class="brand"><span class="logo"></span>肝臓アトラス</div>
+  <nav class="seg" id="species"><button data-v="mouse">マウス</button><button data-v="human">ヒト</button></nav>
+  <nav class="seg" id="state"><button data-v="normal">正常</button><button data-v="bdl">総胆管結紮（BDL）</button><button data-v="gallstone">胆石</button></nav>
+  <div class="tools"><button class="chip" id="btnXray" title="肝実質を透過（Xキー）">透過</button><button class="chip" id="btnLabels">ラベル</button><button class="chip" id="btnPlay">動き</button></div>
+</header>
+
+<aside class="left" id="cards"></aside>
+<section id="panel">
+  <button class="drawer-bar" id="drawerBar" type="button" aria-expanded="false">
+    <span class="drawer-grip"></span>
+    <span class="drawer-title" id="drawerTitle">解説・構造</span>
+    <span class="drawer-chev" id="drawerChev">▲ 開く</span>
+  </button>
+  <div id="panelBody"></div>
+</section>
+
+<div class="tagline">肝臓のしくみを<br>臓器から分子まで</div>
+<div class="zoombar">
+  <button id="reset" title="視点を戻す">⟲</button>
+  <button id="zout" title="1段階もどる">−</button>
+  <input id="zr" type="range" min="0" max="4" step="1" value="0" />
+  <button id="zin" title="1段階ズーム">＋</button>
+  <div id="ticks"><button data-i="0">臓器</button><button data-i="1">小葉</button><button data-i="2">ゾーン</button><button data-i="3">細胞</button><button data-i="4">輸送体</button></div>
+</div>
+<div id="tip"></div>
+<div id="loader" class="on"><span>立体を組み立て中…</span></div>
+
+<script src="js/three.min.js"></script>
+<script src="js/data.js"></script>
+<script src="js/sdf.js"></script>
+<script src="js/levels.js"></script>
+<script src="js/main.js"></script>
+<script>
+  if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
+    navigator.serviceWorker.register("sw.js").catch(() => {});
+  }
+</script>
+</body>
+</html>
