@@ -20,14 +20,6 @@
         return r.arrayBuffer();
       })
     };
-  } else if (location.protocol === "file:") {
-    (function () {
-      var s = document.createElement("script");
-      s.src = "baked/l1_mouse_normal.js";
-      s.async = true;
-      window.__L1_FILE_PROMISE = new Promise(function (res, rej) { s.onload = res; s.onerror = rej; });
-      document.head.appendChild(s);
-    })();
   }
 </script>
 <style>

@@ -828,11 +828,6 @@
   }
   function boot() {
     const tBakedStart = performance.now();
-    // file:// で <head> の先行ロードがすでに終わっていれば完全同期で即描画
-    if (BK && BK.isFile && BK.consumeB64("l1_mouse_normal")) {
-      finishBoot(tBakedStart);
-      return;
-    }
     if (BK) {
       BK.loadChunk("l1_mouse_normal").then(() => finishBoot(tBakedStart));
     } else {

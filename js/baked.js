@@ -1,6 +1,5 @@
-// 肝臓3Dアトラス：事前ベイク済みジオメトリの高速ローダー（http:// は .bin fetch、file:// は .js 埋め込み）
+// 肝臓3Dアトラス：事前ベイク済みジオメトリの高速ローダー（baked/*.bin を fetch して gzip 展開。file:// では読めず実行時生成に切り替わる）
 (function () {
-  const isFile = typeof location !== "undefined" && location.protocol === "file:";
   const geoCache = new Map();
   const loadedChunks = new Set();
   const chunkPromises = new Map();
@@ -9,21 +8,18 @@
   const SRGB_U8_LUT = new Float32Array(256);
   for (let i = 0; i < 256; i++) SRGB_U8_LUT[i] = Math.pow(i / 255, 2.2);
 
-  function decodeBase64ToBuffer(b64) {
-    if (typeof Uint8Array.fromBase64 === "function") {
-      return Uint8Array.fromBase64(b64).buffer;
-    }
-    const bin = atob(b64);
-    const len = bin.length;
-    const u8 = new Uint8Array(len);
-    for (let i = 0; i < len; i++) u8[i] = bin.charCodeAt(i);
-    return u8.buffer;
+  // gzip（先頭 1f 8b）なら DecompressionStream で展開する
+  function gunzip(buf) {
+    const u = new Uint8Array(buf, 0, 2);
+    if (u[0] !== 0x1f || u[1] !== 0x8b) return Promise.resolve(buf);
+    if (typeof DecompressionStream === "undefined") return Promise.reject(new Error("DecompressionStream unsupported"));
+    return new Response(new Blob([buf]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer();
   }
 
   function parseBin(buf) {
     const dv = new DataView(buf);
-    // Magic "LVB1"
-    if (dv.getUint8(0) !== 0x4c || dv.getUint8(1) !== 0x56 || dv.getUint8(2) !== 0x42 || dv.getUint8(3) !== 0x31) {
+    // Magic "LVB2"
+    if (dv.getUint8(0) !== 0x4c || dv.getUint8(1) !== 0x56 || dv.getUint8(2) !== 0x42 || dv.getUint8(3) !== 0x32) {
       throw new Error("Invalid baked geometry header");
     }
     const jsonLen = dv.getUint32(4, true);
@@ -66,8 +62,8 @@
         }
         g.setAttribute("position", new THREE.BufferAttribute(posF32, 3));
 
-        // Normal: Int16 normalized [-32767..32767] -> direct zero-copy view
-        const norView = new Int16Array(buf, bodyBase + info.norOff, nV3);
+        // Normal: Int8 normalized [-127..127] -> direct zero-copy view
+        const norView = new Int8Array(buf, bodyBase + info.norOff, nV3);
         g.setAttribute("normal", new THREE.BufferAttribute(norView, 3, true));
 
         // Index: Uint16 or Uint32 direct zero-copy view
@@ -94,63 +90,20 @@
     }
   }
 
-  function consumeB64(name) {
-    if (loadedChunks.has(name)) return true;
-    const bag = window.__BAKED_B64;
-    if (bag && bag[name]) {
-      const buf = decodeBase64ToBuffer(bag[name]);
-      delete bag[name];
-      parseBin(buf);
-      loadedChunks.add(name);
-      return true;
-    }
-    return false;
-  }
-
-  function loadScriptChunk(name) {
-    if (consumeB64(name)) return Promise.resolve();
-    if (name === "l1_mouse_normal" && window.__L1_FILE_PROMISE) {
-      const pre = window.__L1_FILE_PROMISE;
-      delete window.__L1_FILE_PROMISE;
-      return pre.then(() => {
-        if (!consumeB64(name)) throw new Error("Baked script did not register: " + name);
-      });
-    }
-    return new Promise((resolve, reject) => {
-      if (consumeB64(name)) { resolve(); return; }
-      const sc = document.createElement("script");
-      sc.src = "baked/" + name + ".js";
-      sc.async = true;
-      sc.onload = () => {
-        try {
-          if (!consumeB64(name)) throw new Error("Baked script did not register: " + name);
-          resolve();
-        } catch (err) { reject(err); }
-      };
-      sc.onerror = () => reject(new Error("Failed to load baked/" + name + ".js"));
-      document.head.appendChild(sc);
-    });
-  }
-
   function loadChunk(name) {
     if (loadedChunks.has(name)) return Promise.resolve();
     if (chunkPromises.has(name)) return chunkPromises.get(name);
-    let p;
-    if (isFile) {
-      p = loadScriptChunk(name);
-    } else {
-      const pre = window.__BAKED_PREFETCH && window.__BAKED_PREFETCH[name];
-      const fetchP = pre
-        ? (delete window.__BAKED_PREFETCH[name], pre)
-        : fetch("baked/" + name + ".bin").then((r) => {
-            if (!r.ok) throw new Error("HTTP " + r.status + " for baked/" + name + ".bin");
-            return r.arrayBuffer();
-          });
-      p = fetchP.then((buf) => {
-        parseBin(buf);
-        loadedChunks.add(name);
-      });
-    }
+    const pre = window.__BAKED_PREFETCH && window.__BAKED_PREFETCH[name];
+    const fetchP = pre
+      ? (delete window.__BAKED_PREFETCH[name], pre)
+      : fetch("baked/" + name + ".bin").then((r) => {
+          if (!r.ok) throw new Error("HTTP " + r.status + " for baked/" + name + ".bin");
+          return r.arrayBuffer();
+        });
+    let p = fetchP.then(gunzip).then((buf) => {
+      parseBin(buf);
+      loadedChunks.add(name);
+    });
     p = p.catch((err) => {
       chunkPromises.delete(name);
       console.warn("[LiverBaked] fallback to live SDF for chunk " + name + ":", err.message || err);
@@ -184,11 +137,9 @@
   }
 
   window.LiverBaked = {
-    isFile,
     get: (k) => geoCache.get(k) || null,
     has: (k) => geoCache.has(k),
     isLoaded: (c) => loadedChunks.has(c),
-    consumeB64,
     loadChunk,
     chunksFor,
     isReadyFor,

@@ -1,4 +1,4 @@
-// 肝臓3Dアトラス：全階層×全種×全病態のジオメトリを事前ベイクして baked/*.bin + baked/*.js を生成する
+// 肝臓3Dアトラス：全階層×全種×全病態のジオメトリを事前ベイクして baked/*.bin（gzip）を生成する
 // 使い方: node scripts/bake.js
 "use strict";
 
@@ -6,6 +6,7 @@ const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
 const crypto = require("crypto");
+const zlib = require("zlib");
 
 const ROOT = path.resolve(__dirname, "..");
 const OUT_DIR = path.join(ROOT, "baked");
@@ -92,15 +93,15 @@ function quantizeGeo(geo) {
     posU16[i3 + 2] = Math.max(0, Math.min(65535, Math.round((posAttr.getZ(i) - z0) * invZ)));
   }
 
-  const norI16 = new Int16Array(nV3);
+  const norI8 = new Int8Array(nV3);
   for (let i = 0; i < nV; i++) {
     const i3 = i * 3;
     const nx = norAttr ? norAttr.getX(i) : 0;
     const ny = norAttr ? norAttr.getY(i) : 1;
     const nz = norAttr ? norAttr.getZ(i) : 0;
-    norI16[i3] = Math.max(-32767, Math.min(32767, Math.round(nx * 32767)));
-    norI16[i3 + 1] = Math.max(-32767, Math.min(32767, Math.round(ny * 32767)));
-    norI16[i3 + 2] = Math.max(-32767, Math.min(32767, Math.round(nz * 32767)));
+    norI8[i3] = Math.max(-127, Math.min(127, Math.round(nx * 127)));
+    norI8[i3 + 1] = Math.max(-127, Math.min(127, Math.round(ny * 127)));
+    norI8[i3 + 2] = Math.max(-127, Math.min(127, Math.round(nz * 127)));
   }
 
   let colU8 = null;
@@ -138,7 +139,7 @@ function quantizeGeo(geo) {
   const h = crypto.createHash("sha256");
   h.update(Buffer.from(new Float32Array([x0, y0, z0, x1, y1, z1]).buffer));
   h.update(Buffer.from(posU16.buffer, posU16.byteOffset, posU16.byteLength));
-  h.update(Buffer.from(norI16.buffer, norI16.byteOffset, norI16.byteLength));
+  h.update(Buffer.from(norI8.buffer, norI8.byteOffset, norI8.byteLength));
   h.update(Buffer.from(idxArr.buffer, idxArr.byteOffset, idxArr.byteLength));
   const geomHash = h.digest("hex");
 
@@ -146,7 +147,7 @@ function quantizeGeo(geo) {
     nV, nI, idxType,
     bmin: [+x0.toFixed(6), +y0.toFixed(6), +z0.toFixed(6)],
     bmax: [+x1.toFixed(6), +y1.toFixed(6), +z1.toFixed(6)],
-    bs, posU16, norI16, colU8, idxArr, geomHash
+    bs, posU16, norI8, colU8, idxArr, geomHash
   };
 }
 
@@ -201,7 +202,7 @@ for (const cname of CHUNK_ORDER) {
       localHashes.set(q.geomHash, key);
       if (cname === "l1_mouse_normal") l1BaseHashes.set(q.geomHash, key);
       const posOff = appendAligned(Buffer.from(q.posU16.buffer, q.posU16.byteOffset, q.posU16.byteLength));
-      const norOff = appendAligned(Buffer.from(q.norI16.buffer, q.norI16.byteOffset, q.norI16.byteLength));
+      const norOff = appendAligned(Buffer.from(q.norI8.buffer, q.norI8.byteOffset, q.norI8.byteLength));
       const colOff = q.colU8 ? appendAligned(Buffer.from(q.colU8.buffer, q.colU8.byteOffset, q.colU8.byteLength)) : 0;
       const idxOff = appendAligned(Buffer.from(q.idxArr.buffer, q.idxArr.byteOffset, q.idxArr.byteLength));
       meshMetas.push({
@@ -223,22 +224,21 @@ for (const cname of CHUNK_ORDER) {
   if (jRem) jsonBuf = Buffer.concat([jsonBuf, Buffer.alloc(4 - jRem, 0x20)]);
 
   const head = Buffer.alloc(8);
-  head.write("LVB1", 0, "ascii");
+  head.write("LVB2", 0, "ascii");
   head.writeUInt32LE(jsonBuf.length, 4);
 
-  const binBuf = Buffer.concat([head, jsonBuf, ...bodyParts]);
+  const rawBuf = Buffer.concat([head, jsonBuf, ...bodyParts]);
+  // gzip で保存し、ブラウザ側で DecompressionStream により展開する
+  const binBuf = zlib.gzipSync(rawBuf, { level: 9 });
   totalBinBytes += binBuf.length;
 
   const binPath = path.join(OUT_DIR, `${cname}.bin`);
   fs.writeFileSync(binPath, binBuf);
-
-  // file:// (Edge --app 等) 用に fetch 不要の .js ラッパーも出力
-  const jsPath = path.join(OUT_DIR, `${cname}.js`);
-  const jsContent = `(window.__BAKED_B64=window.__BAKED_B64||{})["${cname}"]="${binBuf.toString("base64")}";\n`;
-  fs.writeFileSync(jsPath, jsContent, "utf8");
+  const oldJs = path.join(OUT_DIR, `${cname}.js`);
+  if (fs.existsSync(oldJs)) fs.unlinkSync(oldJs);
 
   const refCnt = meshMetas.filter((m) => m.ref).length;
-  console.log(`Wrote baked/${cname}.bin (${(binBuf.length / 1024).toFixed(1)} KB) + .js | ${meshMetas.length} meshes (${refCnt} color-only refs)`);
+  console.log(`Wrote baked/${cname}.bin (${(binBuf.length / 1024).toFixed(1)} KB gz, raw ${(rawBuf.length / 1024).toFixed(1)} KB) | ${meshMetas.length} meshes (${refCnt} color-only refs)`);
 }
 
 console.log(`\nDone in ${((performance.now() - tAll) / 1000).toFixed(2)} s. Total .bin: ${(totalBinBytes / 1024 / 1024).toFixed(2)} MB across ${captured.size} unique keys.`);
